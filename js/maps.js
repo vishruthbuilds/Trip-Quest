@@ -45,21 +45,26 @@ export function drawItineraryRoute(destinations) {
   markersLayer.clearLayers();
   if (routeLine) {
     mapInstance.removeLayer(routeLine);
+    routeLine = null;
   }
 
   if (!destinations || destinations.length === 0) return;
 
   const latlngs = [];
+  let sightIndex = 1;
 
-  destinations.forEach((place, index) => {
+  destinations.forEach((place) => {
     const coords = [place.lat, place.lng];
     latlngs.push(coords);
 
+    const isHotel = place.category === 'Hotel' || place.id === 'hotel-start' || place.id === 'hotel-end';
+    
     // Playful custom marker icon using divIcon
+    const pinLabel = isHotel ? '🏨' : sightIndex++;
     const customIcon = L.divIcon({
       html: `
-        <div class="custom-map-pin animate__animated animate__bounceIn" style="background-color: ${getCategoryColor(place.category)}">
-          <span class="pin-number">${index + 1}</span>
+        <div class="custom-map-pin animate__animated animate__bounceIn" style="background-color: ${isHotel ? '#121225' : getCategoryColor(place.category)}; border: 3px solid ${isHotel ? '#FF6B4A' : '#FFF'};">
+          <span class="pin-number" style="font-size: ${isHotel ? '13px' : '11px'}; color: #FFF; font-weight: bold;">${pinLabel}</span>
         </div>
       `,
       className: 'custom-leaflet-icon',
@@ -72,11 +77,11 @@ export function drawItineraryRoute(destinations) {
     // Custom popup
     const popupContent = `
       <div class="map-popup-card">
-        <img src="${place.photo}" alt="${place.name}" class="popup-img" />
+        ${place.photo ? `<img src="${place.photo}" alt="${place.name}" class="popup-img" />` : ''}
         <div class="popup-details">
           <h4>${place.name}</h4>
           <span class="popup-category">${place.category || 'Sight'}</span>
-          <div class="popup-rating">⭐ ${place.rating || 'N/A'}</div>
+          ${place.rating ? `<div class="popup-rating">⭐ ${place.rating}</div>` : ''}
           <p>${place.description || ''}</p>
         </div>
       </div>
@@ -104,6 +109,115 @@ export function drawItineraryRoute(destinations) {
     }
   } else if (latlngs.length === 1) {
     mapInstance.setView(latlngs[0], 13);
+  }
+}
+
+export function drawClustersOnMap(places, hotel) {
+  if (!mapInstance || !markersLayer) return;
+
+  // Clear previous markers & lines
+  markersLayer.clearLayers();
+  if (routeLine) {
+    mapInstance.removeLayer(routeLine);
+    routeLine = null;
+  }
+
+  if ((!places || places.length === 0) && !hotel) return;
+
+  const latlngs = [];
+
+  // Draw hotel if set
+  if (hotel) {
+    const coords = [hotel.lat, hotel.lng];
+    latlngs.push(coords);
+
+    const hotelIcon = L.divIcon({
+      html: `
+        <div class="custom-map-pin animate__animated animate__bounceIn" style="background-color: #121225; border: 3px solid #FF6B4A;">
+          <span class="pin-number" style="font-size: 14px;">🏨</span>
+        </div>
+      `,
+      className: 'custom-leaflet-icon',
+      iconSize: [38, 38],
+      iconAnchor: [19, 38]
+    });
+
+    const marker = L.marker(coords, { icon: hotelIcon });
+    marker.bindPopup(`<b>🏨 Base Hotel</b><br>${hotel.name}`);
+    markersLayer.addLayer(marker);
+  }
+
+  // Define cluster colors (adventure palettes: Orange, Blue, Teal, Purple, Yellow, etc.)
+  const clusterColors = ['#FF6B4A', '#3B82F6', '#10B981', '#8B5CF6', '#F59E0B', '#EC4899', '#14B8A6'];
+
+  // Map places to markers
+  places.forEach((place) => {
+    const coords = [place.lat, place.lng];
+    latlngs.push(coords);
+
+    const clusterId = place.clusterId !== undefined ? place.clusterId : 0;
+    const color = clusterColors[clusterId % clusterColors.length];
+
+    const customIcon = L.divIcon({
+      html: `
+        <div class="custom-map-pin animate__animated animate__bounceIn" style="background-color: ${color}; border: 2.5px solid #FFF;">
+          <span class="pin-number" style="font-size: 12px; color: #FFF; font-weight: 800;">${String.fromCharCode(65 + clusterId)}</span>
+        </div>
+      `,
+      className: 'custom-leaflet-icon',
+      iconSize: [32, 32],
+      iconAnchor: [16, 32]
+    });
+
+    const marker = L.marker(coords, { icon: customIcon });
+    marker.bindPopup(`<b>${place.name}</b><br>Category: ${place.category || 'Sight'}<br>Cluster: Group ${String.fromCharCode(65 + clusterId)}`);
+    markersLayer.addLayer(marker);
+  });
+
+  // Draw shaded circles for cluster spreads
+  const clusterGroups = {};
+  places.forEach(p => {
+    const cid = p.clusterId !== undefined ? p.clusterId : 0;
+    if (!clusterGroups[cid]) clusterGroups[cid] = [];
+    clusterGroups[cid].push(p);
+  });
+
+  Object.entries(clusterGroups).forEach(([cid, group]) => {
+    if (group.length > 0) {
+      const color = clusterColors[parseInt(cid) % clusterColors.length];
+      let sumLat = 0, sumLng = 0;
+      group.forEach(p => { sumLat += p.lat; sumLng += p.lng; });
+      const centLat = sumLat / group.length;
+      const centLng = sumLng / group.length;
+
+      let maxDist = 0;
+      group.forEach(p => {
+        const dist = Math.sqrt(Math.pow(p.lat - centLat, 2) + Math.pow(p.lng - centLng, 2));
+        if (dist > maxDist) maxDist = dist;
+      });
+
+      const radiusMeters = Math.max(500, maxDist * 111000 * 1.15); // convert to meters with margin
+
+      const circle = L.circle([centLat, centLng], {
+        color: color,
+        fillColor: color,
+        fillOpacity: 0.12,
+        weight: 1.5,
+        dashArray: '5, 5',
+        radius: radiusMeters
+      });
+      markersLayer.addLayer(circle);
+    }
+  });
+
+  // Fit bounds to show everything
+  if (latlngs.length > 0) {
+    const bounds = L.latLngBounds(latlngs);
+    try {
+      mapInstance.fitBounds(bounds, { padding: [40, 40] });
+    } catch (e) {
+      console.warn('Map fit bounds issue:', e);
+    }
   }
 }
 

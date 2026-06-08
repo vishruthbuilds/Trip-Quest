@@ -1271,3 +1271,152 @@ h1 {
   0%, 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
   50% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
 }
+
+/* Wizard System styles */
+.wizard-header {
+  margin-bottom: 12px;
+  background: rgba(30, 30, 56, 0.4);
+  padding: 10px 14px;
+  border-radius: var(--border-radius-md);
+  border: 1px solid #28284E;
+}
+
+.wizard-progress-bar-container {
+  width: 100%;
+  height: 6px;
+  background: #14142B;
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+
+#wizard-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--primary), #FFA07A);
+  transition: width 0.3s ease-in-out;
+}
+
+.wizard-step-panel {
+  display: none;
+  animation: fadeIn 0.25s ease-in-out;
+}
+
+.wizard-step-panel.active {
+  display: block;
+}
+
+.wizard-actions-bar {
+  background: rgba(30, 30, 56, 0.6);
+  padding: 10px 14px;
+  border-radius: var(--border-radius-md);
+  border: 1px solid #28284E;
+}
+
+/* User profile badge in Lobby */
+.user-profile-badge {
+  padding: 10px;
+}
+
+/* Day assignment grid */
+.select-cluster-day:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+/* Text overlaps & spacing layout fixes */
+.card-info-title {
+  font-weight: 800;
+  font-size: 15px;
+  color: #FFF;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+.card-info-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Transit indicator leg */
+.transit-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  background: rgba(255,255,255,0.06);
+  padding: 2px 6px;
+  border-radius: 8px;
+  color: var(--text-muted);
+  margin-left: 14px;
+  border-left: 2px dashed #28284E;
+}
+
+/* ────────────────────────────────────────────────
+   Profile Photo Picker (Sign-Up Flow)
+──────────────────────────────────────────────── */
+.profile-photo-picker {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.profile-photo-preview {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  border: 3px solid var(--primary);
+  background: rgba(255, 107, 74, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 4px rgba(255, 107, 74, 0.15), 0 4px 16px rgba(0,0,0,0.3);
+  transition: box-shadow 0.3s ease;
+}
+
+.profile-photo-preview:hover {
+  box-shadow: 0 0 0 6px rgba(255, 107, 74, 0.25), 0 6px 20px rgba(0,0,0,0.4);
+}
+
+.profile-photo-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+}
+
+.profile-photo-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  flex: 1;
+}
+
+.profile-upload-btn {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 6px;
+  width: auto !important;
+  white-space: nowrap;
+  transition: transform 0.15s ease, box-shadow 0.15s ease !important;
+}
+
+.profile-upload-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 5px 0 #1D4ED8 !important;
+}
+
+.profile-upload-btn:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 0 #1D4ED8 !important;
+}

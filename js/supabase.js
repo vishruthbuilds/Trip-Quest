@@ -146,7 +146,10 @@ export async function dbCreateTrip(trip) {
     destinations: trip.destinations,
     itinerary: trip.itinerary,
     active_challenge: trip.activeChallenge,
-    teams: trip.teams
+    teams: trip.teams,
+    hotel: trip.hotel || null,
+    clusters: trip.clusters || null,
+    started: trip.started || false
   });
 
   if (error) throw error;
@@ -227,6 +230,9 @@ export async function dbGetTripDetails(tripCode) {
     itinerary: trip.itinerary,
     activeChallenge: trip.active_challenge,
     teams: trip.teams,
+    hotel: trip.hotel,
+    clusters: trip.clusters,
+    started: trip.started,
     members: (players || []).map(p => ({
       id: p.id,
       name: p.name,
@@ -267,6 +273,10 @@ export async function dbUpdateTrip(tripCode, fields) {
   if (fields.itinerary !== undefined) updateObj.itinerary = fields.itinerary;
   if (fields.activeChallenge !== undefined) updateObj.active_challenge = fields.activeChallenge;
   if (fields.teams !== undefined) updateObj.teams = fields.teams;
+  if (fields.hotel !== undefined) updateObj.hotel = fields.hotel;
+  if (fields.clusters !== undefined) updateObj.clusters = fields.clusters;
+  if (fields.started !== undefined) updateObj.started = fields.started;
+  if (fields.destinations !== undefined) updateObj.destinations = fields.destinations;
 
   if (Object.keys(updateObj).length > 0) {
     const { error } = await client.from('trips').update(updateObj).eq('code', tripCode);
@@ -326,3 +336,75 @@ export async function dbAddGalleryPhoto(tripCode, url, caption, uploadedBy, cate
   });
   if (error) console.error('Error adding Supabase gallery photo:', error);
 }
+
+// Local accounts database helpers
+function getLocalAccounts() {
+  const raw = localStorage.getItem('tripquest_local_accounts');
+  return raw ? JSON.parse(raw) : {};
+}
+
+function saveLocalAccounts(accounts) {
+  localStorage.setItem('tripquest_local_accounts', JSON.stringify(accounts));
+}
+
+// SUPABASE & LOCAL AUTH API
+export async function supabaseSignUp(email, password, metadata) {
+  const client = getSupabaseClient();
+  if (!client) {
+    const accounts = getLocalAccounts();
+    const normalizedEmail = email.toLowerCase().trim();
+    if (accounts[normalizedEmail]) {
+      throw new Error('User already exists in local storage database!');
+    }
+    const id = 'usr_' + Math.random().toString(36).substr(2, 9);
+    const userObj = {
+      id,
+      email: normalizedEmail,
+      user_metadata: metadata
+    };
+    accounts[normalizedEmail] = {
+      password,
+      user: userObj
+    };
+    saveLocalAccounts(accounts);
+    return { user: userObj };
+  }
+
+  const { data, error } = await client.auth.signUp({
+    email,
+    password,
+    options: {
+      data: metadata
+    }
+  });
+  if (error) throw error;
+  return data;
+}
+
+export async function supabaseSignIn(email, password) {
+  const client = getSupabaseClient();
+  if (!client) {
+    const accounts = getLocalAccounts();
+    const normalizedEmail = email.toLowerCase().trim();
+    const account = accounts[normalizedEmail];
+    if (!account || account.password !== password) {
+      throw new Error('Invalid email or password!');
+    }
+    return { user: account.user };
+  }
+
+  const { data, error } = await client.auth.signInWithPassword({
+    email,
+    password
+  });
+  if (error) throw error;
+  return data;
+}
+
+export async function supabaseSignOut() {
+  const client = getSupabaseClient();
+  if (client) {
+    await client.auth.signOut();
+  }
+}
+

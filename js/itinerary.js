@@ -27,19 +27,104 @@ export function parseTime(timeStr) {
   return hrs * 60 + mins;
 }
 
-export function generateItinerary(destinations, days, travelStyle, startLocation = null) {
-  if (destinations.length === 0) return {};
+export function kMeansClustering(places, k) {
+  if (places.length === 0) return [];
+  if (places.length <= k) {
+    return places.map((p, idx) => ({ ...p, clusterId: idx }));
+  }
 
-  // Sort destinations using a nearest-neighbor clustering approach
-  const unvisited = [...destinations];
+  // Initialize centroids spread out across the places array
+  const centroids = [];
+  const step = Math.floor(places.length / k);
+  for (let i = 0; i < k; i++) {
+    const idx = Math.min(i * step, places.length - 1);
+    centroids.push({ lat: places[idx].lat, lng: places[idx].lng });
+  }
+
+  let assignments = Array(places.length).fill(-1);
+  let changed = true;
+  let maxIter = 100;
+
+  while (changed && maxIter > 0) {
+    changed = false;
+    maxIter--;
+
+    // Assign places to nearest centroid
+    for (let i = 0; i < places.length; i++) {
+      const p = places[i];
+      let minDist = Infinity;
+      let bestC = 0;
+      for (let c = 0; c < k; c++) {
+        const dist = Math.sqrt(Math.pow(p.lat - centroids[c].lat, 2) + Math.pow(p.lng - centroids[c].lng, 2));
+        if (dist < minDist) {
+          minDist = dist;
+          bestC = c;
+        }
+      }
+      if (assignments[i] !== bestC) {
+        assignments[i] = bestC;
+        changed = true;
+      }
+    }
+
+    // Recompute centroids
+    const sums = Array(k).fill(null).map(() => ({ lat: 0, lng: 0, count: 0 }));
+    for (let i = 0; i < places.length; i++) {
+      const c = assignments[i];
+      sums[c].lat += places[i].lat;
+      sums[c].lng += places[i].lng;
+      sums[c].count++;
+    }
+
+    for (let c = 0; c < k; c++) {
+      if (sums[c].count > 0) {
+        centroids[c] = {
+          lat: sums[c].lat / sums[c].count,
+          lng: sums[c].lng / sums[c].count
+        };
+      }
+    }
+  }
+
+  return places.map((p, idx) => ({
+    ...p,
+    clusterId: assignments[idx]
+  }));
+}
+
+// Distance helper in Kilometers (Haversine formula)
+export function getDistanceInKm(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Radius of the earth in km
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = 
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c; // Distance in km
+}
+
+// TSP Heuristic route planner starting and ending at the Hotel
+export function optimizeRoute(dayPlaces, hotel, endAtHotel = true, travelStyle = 'balanced') {
+  if (!dayPlaces || dayPlaces.length === 0) return [];
+  
+  // Exclude any existing start/end hotel placeholders so we don't double count
+  const sightsOnly = dayPlaces.filter(p => p.id !== 'hotel-start' && p.id !== 'hotel-end');
+  
+  if (sightsOnly.length === 0) return [];
+
+  const unvisited = [...sightsOnly];
   const sorted = [];
-  let currentPoint = startLocation || { lat: unvisited[0].lat, lng: unvisited[0].lng };
+  
+  // Starting point is the hotel if specified, else first place
+  let currentPoint = hotel ? { lat: hotel.lat, lng: hotel.lng } : { lat: unvisited[0].lat, lng: unvisited[0].lng };
 
   while (unvisited.length > 0) {
     let nearestIdx = 0;
     let minDist = Infinity;
     for (let i = 0; i < unvisited.length; i++) {
-      const dist = getDistance(currentPoint, unvisited[i]);
+      const dist = getDistanceInKm(currentPoint.lat, currentPoint.lng, unvisited[i].lat, unvisited[i].lng);
       if (dist < minDist) {
         minDist = dist;
         nearestIdx = i;
@@ -50,125 +135,131 @@ export function generateItinerary(destinations, days, travelStyle, startLocation
     currentPoint = { lat: nextPlace.lat, lng: nextPlace.lng };
   }
 
-  // Determine starting hour and items per day based on travel style
-  let startMinutes = 600; // 10:00 AM default
-  let placesPerDay = 2;
-  let travelBuffer = 30; // 30 mins between places
-
+  // Determine starting hour and transit buffers based on travel style
+  let startMinutes = 570; // 09:30 AM default
   if (travelStyle === 'relaxed') {
     startMinutes = 630; // 10:30 AM
-    placesPerDay = 2;
-    travelBuffer = 45;
   } else if (travelStyle === 'balanced') {
     startMinutes = 570; // 09:30 AM
-    placesPerDay = 3;
-    travelBuffer = 30;
   } else if (travelStyle === 'packed') {
     startMinutes = 510; // 08:30 AM
-    placesPerDay = 5;
-    travelBuffer = 20;
   }
 
-  const itinerary = {};
-  for (let d = 1; d <= days; d++) {
-    itinerary[d] = [];
-  }
+  const schedule = [];
+  let currentTime = startMinutes;
 
-  // Distribute places across days
-  let currentDay = 1;
-  sorted.forEach((place, index) => {
-    // Wrap to next day if threshold met
-    if (itinerary[currentDay].length >= placesPerDay && currentDay < days) {
-      currentDay++;
-    }
-    
-    itinerary[currentDay].push({
-      ...place,
-      completed: false
+  // 1. Add Hotel Start Marker if hotel is set
+  if (hotel) {
+    schedule.push({
+      id: 'hotel-start',
+      name: `🏨 Start: ${hotel.name}`,
+      lat: hotel.lat,
+      lng: hotel.lng,
+      category: 'Hotel',
+      time: formatTime(currentTime),
+      endTime: formatTime(currentTime + 15),
+      startMinutes: currentTime,
+      duration: 15,
+      description: 'Starting base point. Gear up for the adventure!',
+      completed: true
     });
+    currentTime += 15;
+  }
+
+  // 2. Add Sights with transit calculation
+  let prevPoint = hotel ? { lat: hotel.lat, lng: hotel.lng } : { lat: sorted[0].lat, lng: sorted[0].lng };
+  sorted.forEach((place, idx) => {
+    const distKm = getDistanceInKm(prevPoint.lat, prevPoint.lng, place.lat, place.lng);
+    const isWalking = distKm < 1.2; // Walk mode threshold
+    const transitTime = isWalking ? Math.max(8, Math.round(distKm * 15)) : 12; // walking speed ~4km/h = 15min/km
+    
+    currentTime += transitTime;
+
+    const duration = place.estTime || place.duration || 90;
+    schedule.push({
+      ...place,
+      time: formatTime(currentTime),
+      endTime: formatTime(currentTime + duration),
+      startMinutes: currentTime,
+      duration: duration,
+      completed: place.completed || false,
+      transitMode: isWalking ? 'Walk 🚶' : 'Drive 🚗',
+      transitDuration: transitTime,
+      distanceFromPrev: distKm
+    });
+
+    currentTime += duration;
+    prevPoint = { lat: place.lat, lng: place.lng };
   });
 
-  // Calculate schedule timings for each day
-  for (let d = 1; d <= days; d++) {
-    let currentTime = startMinutes;
-    itinerary[d] = itinerary[d].map(item => {
-      const scheduledTime = formatTime(currentTime);
-      const duration = item.estTime || 90;
-      const endTime = formatTime(currentTime + duration);
-      
-      const scheduledItem = {
-        ...item,
-        time: scheduledTime,
-        endTime: endTime,
-        startMinutes: currentTime,
-        duration: duration
-      };
+  // 3. Add Hotel End Marker
+  if (hotel && endAtHotel) {
+    const distKm = getDistanceInKm(prevPoint.lat, prevPoint.lng, hotel.lat, hotel.lng);
+    const isWalking = distKm < 1.2;
+    const transitTime = isWalking ? Math.max(8, Math.round(distKm * 15)) : 12;
+    currentTime += transitTime;
 
-      // Progress currentTime for next item
-      currentTime += duration + travelBuffer;
-      return scheduledItem;
+    schedule.push({
+      id: 'hotel-end',
+      name: `🏨 End: Back to ${hotel.name}`,
+      lat: hotel.lat,
+      lng: hotel.lng,
+      category: 'Hotel',
+      time: formatTime(currentTime),
+      endTime: formatTime(currentTime + 15),
+      startMinutes: currentTime,
+      duration: 15,
+      description: 'Day quest complete. Head back to sleep, sync memories and review points!',
+      completed: false,
+      transitMode: isWalking ? 'Walk 🚶' : 'Drive 🚗',
+      transitDuration: transitTime,
+      distanceFromPrev: distKm
     });
   }
 
-  return itinerary;
+  return schedule;
 }
 
-// Recalculate all times for a single day after re-ordering
+// Recalculate schedule times for a day based on local edits/delays
 export function recalculateDaySchedule(dayPlaces, startMinutes = null) {
   if (!dayPlaces || dayPlaces.length === 0) return [];
 
-  // Default start is the start time of the first item, or 9:30 AM
-  let currentTime = startMinutes !== null ? startMinutes : (dayPlaces[0].startMinutes || 570);
-  const travelBuffer = 30;
+  // Exclude hotel placeholders if present, they will be regenerated relative to the hotel
+  const hotelStart = dayPlaces.find(p => p.id === 'hotel-start');
+  const hotelEnd = dayPlaces.find(p => p.id === 'hotel-end');
+  const hotelObj = hotelStart ? { name: hotelStart.name.replace('🏨 Start: ', ''), lat: hotelStart.lat, lng: hotelStart.lng } : null;
 
-  return dayPlaces.map(item => {
-    const scheduledTime = formatTime(currentTime);
-    const duration = item.duration || item.estTime || 90;
-    const endTime = formatTime(currentTime + duration);
-    
-    const updated = {
-      ...item,
-      time: scheduledTime,
-      endTime: endTime,
-      startMinutes: currentTime,
-      duration: duration
-    };
-    currentTime += duration + travelBuffer;
-    return updated;
-  });
+  const sights = dayPlaces.filter(p => p.id !== 'hotel-start' && p.id !== 'hotel-end');
+  
+  // Run optimizeRoute on remaining sights to guarantee clean sequence timings
+  return optimizeRoute(sights, hotelObj, !!hotelEnd);
 }
 
 // Suggest itinerary adjustments if user reports a delay
 export function suggestAdjustmentForDelay(dayPlaces, activeItemIndex, actualMinutes) {
   const currentItem = dayPlaces[activeItemIndex];
-  if (!currentItem) return dayPlaces;
+  if (!currentItem) return { adjusted: false, schedule: dayPlaces };
 
   const plannedStart = currentItem.startMinutes;
   const delayMinutes = actualMinutes - plannedStart;
 
   if (delayMinutes <= 15) {
-    // Negligible delay
     return { adjusted: false, schedule: dayPlaces };
   }
 
-  // Create adjusted schedule by pushing all remaining times
   let currentTime = actualMinutes;
-  const travelBuffer = 20; // Reduce travel buffer slightly to optimize/catch up
-
   const adjustedSchedule = dayPlaces.map((item, idx) => {
-    // If completed or before active item, keep original
     if (idx < activeItemIndex) {
       return item;
     }
 
-    const duration = item.duration || item.estTime || 90;
+    // Skip recalculating completed items (already done)
+    const duration = item.duration || 90;
     const scheduledTime = formatTime(currentTime);
     const endTime = formatTime(currentTime + duration);
-    
-    // Check if it exceeds standard opening hours (e.g. 6:30 PM = 1110 mins)
+
     let warning = false;
-    if (item.hours && item.hours !== '2-digit' && item.hours !== '24 Hours') {
-      // Basic check: if opening hours close at 6:00 PM (1080 mins) or similar
+    if (item.hours && item.hours !== '24 Hours') {
       const closeMatch = item.hours.match(/-\s*(\d+):(\d+)\s*(AM|PM)$/i);
       if (closeMatch) {
         let closeHrs = parseInt(closeMatch[1]);
@@ -191,7 +282,8 @@ export function suggestAdjustmentForDelay(dayPlaces, activeItemIndex, actualMinu
       warningMsg: warning ? `⚠️ May close before you finish!` : null
     };
 
-    currentTime += duration + travelBuffer;
+    const transitBuffer = item.transitDuration || 15;
+    currentTime += duration + transitBuffer;
     return updated;
   });
 
@@ -201,3 +293,4 @@ export function suggestAdjustmentForDelay(dayPlaces, activeItemIndex, actualMinu
     schedule: adjustedSchedule
   };
 }
+

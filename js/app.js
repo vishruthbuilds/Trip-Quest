@@ -2,13 +2,24 @@
 import { state } from './state.js';
 import { initializeSync } from './sync.js';
 import { googleMapsLists } from './mockData.js';
-import { generateItinerary, recalculateDaySchedule, suggestAdjustmentForDelay } from './itinerary.js';
-import { initMap, drawItineraryRoute, drawUserPins, panToCoords } from './maps.js';
+import { kMeansClustering, optimizeRoute, recalculateDaySchedule, suggestAdjustmentForDelay } from './itinerary.js';
+import { initMap, drawItineraryRoute, drawClustersOnMap, drawUserPins, panToCoords } from './maps.js';
 import { renderBingoBoard, SpinWheel, triggerConfetti } from './game.js';
 import { testConnection, supabaseConfig, disconnectSupabase, getSupabaseClient } from './supabase.js';
 
 let spinWheel = null;
 let activeDay = 1;
+
+// Wizard State Variables
+let wizardStep = 1;
+let importedSights = [];
+let hotelLocation = null;
+let wizardMapInstance = null;
+let wizardClusters = [];
+let clusterDayAssignments = {};
+
+// Profile photo (base64 data URL) selected during sign-up
+let selectedProfilePhoto = null;
 
 // Document Ready
 document.addEventListener('DOMContentLoaded', () => {
@@ -21,7 +32,6 @@ document.addEventListener('DOMContentLoaded', () => {
       .then(reg => console.log('Service Worker registered successfully!', reg))
       .catch(err => console.warn('Service Worker registration failed:', err));
   }
-
   // Create SpinWheel Instance
   spinWheel = new SpinWheel('spinCanvas', 'btn-spin-wheel', 'spin-result-container');
 
@@ -29,6 +39,7 @@ document.addEventListener('DOMContentLoaded', () => {
   bindOnboardingEvents();
   bindHostPlannerEvents();
   bindBottomNavEvents();
+  bindHomeEvents();
   bindChatEvents();
   bindGameEvents();
   bindGalleryEvents();
@@ -45,6 +56,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Subscribe state updates to hot-reload screens
   state.subscribe((trip, user) => {
     updateHeaderUI(trip, user);
+    updateAuthUI();
     
     // If active trip exists, show Dashboard or route to it
     if (trip) {
@@ -52,9 +64,18 @@ document.addEventListener('DOMContentLoaded', () => {
       
       // If we are still on welcome/join screen, route to room
       const activeScreen = document.querySelector('.screen.active');
-      if (activeScreen.id === 'screen-welcome' || activeScreen.id === 'screen-join' || activeScreen.id === 'screen-host') {
-        showScreen('screen-room');
-        showTab('itinerary');
+      if (activeScreen.id === 'screen-welcome' || activeScreen.id === 'screen-join') {
+        if (trip.started) {
+          showScreen('screen-room');
+          showTab('home');
+        } else {
+          showScreen('screen-host');
+          if (user.isHost) {
+            goToWizardStep(wizardStep);
+          } else {
+            goToWizardStep(7); // Guests wait in lobby
+          }
+        }
       }
 
       // Hot reload active tabs
@@ -62,7 +83,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } else {
       // If trip deleted or left, send to welcome screen
       const activeScreen = document.querySelector('.screen.active');
-      if (activeScreen && activeScreen.id === 'screen-room') {
+      if (activeScreen && (activeScreen.id === 'screen-room' || activeScreen.id === 'screen-host')) {
         showScreen('screen-welcome');
         document.getElementById('bottom-nav').style.display = 'none';
         document.getElementById('header-leave-btn').style.display = 'none';
@@ -78,7 +99,13 @@ document.addEventListener('DOMContentLoaded', () => {
   // Check if there's already an active trip running
   const activeTrip = state.getActiveTrip();
   if (activeTrip) {
+    // If we have an active trip, populate values for wizard resuming
+    if (activeTrip.destinations) importedSights = [...activeTrip.destinations];
+    if (activeTrip.hotel) hotelLocation = activeTrip.hotel;
+    if (activeTrip.clusters) clusterDayAssignments = { ...activeTrip.clusters };
     state.notify();
+  } else {
+    updateAuthUI();
   }
 });
 
@@ -112,7 +139,7 @@ function showTab(tabId) {
   });
 
   // Show/Hide section divs
-  const sections = ['section-itinerary', 'section-play', 'section-chat', 'section-memories', 'section-leaderboard'];
+  const sections = ['section-home', 'section-itinerary', 'section-play', 'section-chat', 'section-leaderboard'];
   sections.forEach(secId => {
     const el = document.getElementById(secId);
     if (el) {
@@ -147,9 +174,12 @@ function triggerMapRedraw() {
 
 function reloadCurrentTabUI(trip, user) {
   const activeNav = document.querySelector('.nav-item.active');
-  const tabId = activeNav ? activeNav.getAttribute('data-tab') : 'itinerary';
+  const tabId = activeNav ? activeNav.getAttribute('data-tab') : 'home';
 
   switch (tabId) {
+    case 'home':
+      populateHomeUI(trip, user);
+      break;
     case 'itinerary':
       populateItineraryUI(trip, user);
       break;
@@ -159,28 +189,138 @@ function reloadCurrentTabUI(trip, user) {
     case 'chat':
       populateChatUI(trip, user);
       break;
-    case 'memories':
-      populateMemoriesUI(trip, user);
-      break;
     case 'leaderboard':
       populateLeaderboardUI(trip, user);
       break;
   }
 }
 
-/* Onboarding Screen & Registration (Welcome View) */
+/* Onboarding Screen & Registration (Welcome View) */function updateAuthUI() {
+  const authSection = document.getElementById('auth-section');
+  const lobbySection = document.getElementById('lobby-section');
+  
+  if (state.user && state.user.email) {
+    authSection.style.display = 'none';
+    lobbySection.style.display = 'block';
+    
+    const photoEl = document.getElementById('lobby-user-photo');
+    const avatarEl = document.getElementById('lobby-user-avatar');
+    const photo = state.user.profilePhoto;
+
+    if (photo) {
+      photoEl.src = photo;
+      photoEl.style.display = 'block';
+      avatarEl.style.display = 'none';
+    } else {
+      avatarEl.innerText = state.user.avatar || '🦊';
+      avatarEl.style.display = 'inline';
+      photoEl.style.display = 'none';
+    }
+
+    document.getElementById('lobby-user-name').innerText = state.user.name || 'Wanderer';
+    document.getElementById('lobby-user-details').innerText = `${state.user.team} Team • ${state.user.email}`;
+  } else {
+    authSection.style.display = 'block';
+    lobbySection.style.display = 'none';
+  }
+}
 
 function bindOnboardingEvents() {
+  // Login / Signup tab switching
+  const tabLogin = document.getElementById('auth-tab-login');
+  const tabSignup = document.getElementById('auth-tab-signup');
+  const signupFields = document.getElementById('signup-fields');
+  let isSignup = false;
+
+  if (tabLogin && tabSignup) {
+    tabLogin.addEventListener('click', () => {
+      tabLogin.className = 'btn btn-primary';
+      tabSignup.className = 'btn btn-secondary';
+      signupFields.style.display = 'none';
+      isSignup = false;
+    });
+
+    tabSignup.addEventListener('click', () => {
+      tabSignup.className = 'btn btn-primary';
+      tabLogin.className = 'btn btn-secondary';
+      signupFields.style.display = 'block';
+      isSignup = true;
+    });
+  }
+
   // Avatar Selection
   const avatarOpts = document.querySelectorAll('.avatar-opt');
   avatarOpts.forEach(opt => {
     opt.addEventListener('click', () => {
       avatarOpts.forEach(o => o.classList.remove('selected'));
       opt.classList.add('selected');
-      const avatar = opt.getAttribute('data-avatar');
-      state.saveUser({ avatar });
+      // Selecting an emoji clears any uploaded photo
+      selectedProfilePhoto = null;
+      const previewImg = document.getElementById('profile-photo-img');
+      const fallbackEmoji = document.getElementById('profile-photo-fallback-emoji');
+      const removeBtn = document.getElementById('btn-remove-photo');
+      if (previewImg) previewImg.style.display = 'none';
+      if (fallbackEmoji) {
+        fallbackEmoji.innerText = opt.getAttribute('data-avatar');
+        fallbackEmoji.style.display = 'block';
+      }
+      if (removeBtn) removeBtn.style.display = 'none';
     });
   });
+
+  // Profile Photo Upload from Device
+  const photoUploadInput = document.getElementById('profile-photo-upload');
+  const photoPreviewImg = document.getElementById('profile-photo-img');
+  const photoFallbackEmoji = document.getElementById('profile-photo-fallback-emoji');
+  const removePhotoBtn = document.getElementById('btn-remove-photo');
+
+  if (photoUploadInput) {
+    photoUploadInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      if (!file.type.startsWith('image/')) {
+        showToast('⚠️ Invalid File', 'Please select a valid image file (JPG, PNG, GIF, etc.)', 'warning');
+        return;
+      }
+
+      if (file.size > 5 * 1024 * 1024) {
+        showToast('⚠️ File Too Large', 'Please choose an image under 5 MB.', 'warning');
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        selectedProfilePhoto = evt.target.result; // base64 data URL
+        if (photoPreviewImg) {
+          photoPreviewImg.src = selectedProfilePhoto;
+          photoPreviewImg.style.display = 'block';
+        }
+        if (photoFallbackEmoji) photoFallbackEmoji.style.display = 'none';
+        if (removePhotoBtn) removePhotoBtn.style.display = 'inline-block';
+        // Deselect emoji when a photo is chosen
+        avatarOpts.forEach(o => o.classList.remove('selected'));
+        showToast('📸 Photo Selected', 'Profile photo ready! Complete sign-up to save it.', 'success');
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  if (removePhotoBtn) {
+    removePhotoBtn.addEventListener('click', () => {
+      selectedProfilePhoto = null;
+      if (photoPreviewImg) photoPreviewImg.style.display = 'none';
+      if (photoFallbackEmoji) {
+        const selectedEmoji = document.querySelector('.avatar-opt.selected');
+        photoFallbackEmoji.innerText = selectedEmoji ? selectedEmoji.getAttribute('data-avatar') : '🦊';
+        photoFallbackEmoji.style.display = 'block';
+      }
+      if (photoUploadInput) photoUploadInput.value = '';
+      removePhotoBtn.style.display = 'none';
+      // Re-select first emoji
+      if (avatarOpts[0]) avatarOpts[0].classList.add('selected');
+    });
+  }
 
   // Team Selection
   const teamBtns = document.querySelectorAll('.team-btn');
@@ -188,30 +328,57 @@ function bindOnboardingEvents() {
     btn.addEventListener('click', () => {
       teamBtns.forEach(b => b.classList.remove('selected'));
       btn.classList.add('selected');
-      const team = btn.getAttribute('data-team');
-      state.saveUser({ team });
     });
+  });
+
+  // Auth form submit
+  document.getElementById('btn-auth-submit').addEventListener('click', async () => {
+    const email = document.getElementById('auth-email').value.trim();
+    const password = document.getElementById('auth-password').value.trim();
+
+    if (!email || !password) {
+      showToast('⚠️ Auth Required', 'Please enter email and password.', 'warning');
+      return;
+    }
+
+    showToast('🔑 Authenticating', 'Logging in to room...', 'info');
+
+    try {
+      if (isSignup) {
+        const nickname = document.getElementById('username-input').value.trim() || 'Wanderer';
+        const avatar = document.querySelector('.avatar-opt.selected')?.getAttribute('data-avatar') || '🦊';
+        const team = document.querySelector('.team-btn.selected')?.getAttribute('data-team') || 'Red';
+        const profilePhoto = selectedProfilePhoto || null;
+        
+        await state.signUpUser(email, password, nickname, avatar, team, profilePhoto);
+        showToast('🎉 Registered', 'Profile successfully registered!', 'success');
+        // Clear photo selection after sign-up
+        selectedProfilePhoto = null;
+      } else {
+        await state.signInUser(email, password);
+        showToast('🎉 Logged In', 'Welcome back to TripQuest!', 'success');
+      }
+      triggerConfetti();
+    } catch (err) {
+      showToast('❌ Auth Error', err.message || 'Error authenticating user.', 'warning');
+    }
+  });
+
+  // Sign out
+  document.getElementById('btn-auth-signout').addEventListener('click', async () => {
+    await state.signOutUser();
+    showToast('🚪 Signed Out', 'Successfully logged out.', 'info');
   });
 
   // Host button click
   document.getElementById('btn-goto-host').addEventListener('click', () => {
-    const nameInput = document.getElementById('username-input').value.trim();
-    if (!nameInput) {
-      showToast('⚠️ Profile Setup', 'Please enter a nickname first!', 'warning');
-      return;
-    }
-    state.saveUser({ name: nameInput });
     showScreen('screen-host');
+    wizardStep = 1;
+    goToWizardStep(1);
   });
 
   // Join screen route button
   document.getElementById('btn-goto-join').addEventListener('click', () => {
-    const nameInput = document.getElementById('username-input').value.trim();
-    if (!nameInput) {
-      showToast('⚠️ Profile Setup', 'Please enter a nickname first!', 'warning');
-      return;
-    }
-    state.saveUser({ name: nameInput });
     showScreen('screen-join');
   });
 
@@ -228,138 +395,615 @@ function bindOnboardingEvents() {
       return;
     }
 
-    // Show loading indicator toast
-    showToast('🔑 Joining Room', 'Connecting to database...', 'info');
+    showToast('🔑 Joining Room', 'Connecting...', 'info');
 
     state.joinTrip(code).then(res => {
       if (res.success) {
         showToast('🎉 Joined Room', `Connected to ${res.trip.name}!`, 'success');
         triggerConfetti();
+        if (res.trip.started) {
+          showScreen('screen-room');
+          showTab('home');
+        } else {
+          showScreen('screen-host');
+          goToWizardStep(7);
+        }
       } else {
         showToast('❌ Not Found', res.message, 'warning');
       }
     }).catch(err => {
-      showToast('❌ Error Joining', err.message || 'Network error.', 'warning');
+      showToast('❌ Error Joining', err.message || 'Error connecting to database.', 'warning');
     });
   });
 }
 
-/* Host Trip Creator & Google Import */
-
-let selectedImportList = null;
-
 function bindHostPlannerEvents() {
-  document.getElementById('btn-host-back').addEventListener('click', () => {
-    showScreen('screen-welcome');
+  // Prev button click
+  document.getElementById('btn-wizard-prev').addEventListener('click', () => {
+    if (wizardStep > 1) {
+      goToWizardStep(wizardStep - 1);
+    }
   });
 
-  // Simulated Google Login
-  const googleBtn = document.getElementById('btn-google-login');
-  googleBtn.addEventListener('click', () => {
-    googleBtn.innerHTML = '🔄 Syncing lists...';
-    googleBtn.disabled = true;
-
-    setTimeout(() => {
-      // Hide auth login card, reveal list selector picker
-      document.getElementById('google-auth-card').style.display = 'none';
-      const pickerCard = document.getElementById('list-picker-card');
-      pickerCard.style.display = 'block';
-      
-      const listContainer = document.getElementById('maps-lists-container');
-      listContainer.innerHTML = '';
-
-      Object.entries(googleMapsLists).forEach(([key, val]) => {
-        const item = document.createElement('div');
-        item.className = 'list-picker-item';
-        item.setAttribute('data-list-key', key);
-        item.innerHTML = `
-          <div class="list-picker-check">📍</div>
-          <div class="list-picker-details">
-            <h4>${val.name}</h4>
-            <p>Created by: ${val.creator} • ${val.places.length} Saved Places</p>
-          </div>
-        `;
-
-        item.addEventListener('click', () => {
-          document.querySelectorAll('.list-picker-item').forEach(li => li.classList.remove('selected'));
-          item.classList.add('selected');
-          selectedImportList = key;
-        });
-
-        listContainer.appendChild(item);
-      });
-
-      // Highlight the first list by default
-      const firstItem = listContainer.querySelector('.list-picker-item');
-      if (firstItem) {
-        firstItem.click();
+  // Next button click
+  document.getElementById('btn-wizard-next').addEventListener('click', () => {
+    if (wizardStep < 8) {
+      if (validateWizardStep(wizardStep)) {
+        goToWizardStep(wizardStep + 1);
       }
-
-      showToast('🔐 Google Maps Import', 'Successfully fetched saved lists!', 'success');
-    }, 1200);
+    }
   });
 
-  // Generate Itinerary Event
-  document.getElementById('btn-generate-itinerary').addEventListener('click', () => {
-    const tripName = document.getElementById('trip-name-input').value.trim() || 'Adventure Trip';
-    const days = parseInt(document.getElementById('trip-days-input').value) || 3;
-    const date = document.getElementById('trip-date-input').value;
-    const style = document.getElementById('travel-style-select').value;
-
-    if (!selectedImportList) {
-      showToast('⚠️ Import Needed', 'Please connect Google Account and select a saved list first!', 'warning');
+  // Google Maps shared lists url import click
+  document.getElementById('btn-import-url').addEventListener('click', async () => {
+    const url = document.getElementById('import-url-input').value.trim();
+    const cat = document.getElementById('import-category-select').value;
+    if (!url) {
+      showToast('⚠️ URL Required', 'Please paste a Google Maps shared list URL first!', 'warning');
       return;
     }
 
-    const importData = googleMapsLists[selectedImportList];
+    document.getElementById('btn-import-url').innerText = '🔄 Scraping...';
+    document.getElementById('btn-import-url').disabled = true;
+
+    try {
+      const proxyUrl = 'https://api.allorigins.win/get?url=' + encodeURIComponent(url);
+      const res = await fetch(proxyUrl);
+      const data = await res.json();
+      const html = data.contents;
+      
+      const parsed = parseGoogleMapsSharedListHTML(html);
+      
+      if (parsed.length > 0) {
+        parsed.forEach(p => p.category = cat);
+        importedSights.push(...parsed);
+        renderImportedSightsList();
+        showToast('📍 Scraped Sights', `Successfully parsed ${parsed.length} places!`, 'success');
+      } else {
+        showToast('⚠️ Scraper Failed', 'CORS proxy failed to parse. Use presets or adder below.', 'warning');
+      }
+    } catch (err) {
+      console.warn('Scraping error:', err);
+      showToast('⚠️ Scraper Offline', 'Could not access URL. Add destinations manually below.', 'warning');
+    } finally {
+      document.getElementById('btn-import-url').innerText = 'Import ⚡';
+      document.getElementById('btn-import-url').disabled = false;
+      document.getElementById('import-url-input').value = '';
+    }
+  });
+
+  // Presets load buttons
+  document.getElementById('btn-preset-goa').addEventListener('click', () => {
+    importedSights = JSON.parse(JSON.stringify(googleMapsLists['goa-adventure'].places));
+    renderImportedSightsList();
+    showToast('📍 Preset Loaded', 'Loaded Goa Adventure beaches!', 'success');
+  });
+
+  document.getElementById('btn-preset-pondy').addEventListener('click', () => {
+    importedSights = JSON.parse(JSON.stringify(googleMapsLists['pondicherry-cafe'].places));
+    renderImportedSightsList();
+    showToast('📍 Preset Loaded', 'Loaded Pondicherry French cafes!', 'success');
+  });
+
+  document.getElementById('btn-preset-kyoto').addEventListener('click', () => {
+    importedSights = JSON.parse(JSON.stringify(googleMapsLists['kyoto-historic'].places));
+    renderImportedSightsList();
+    showToast('📍 Preset Loaded', 'Loaded Kyoto Zen temples!', 'success');
+  });
+
+  // Manual Sight Adder Add button
+  document.getElementById('btn-add-manual').addEventListener('click', () => {
+    const name = document.getElementById('manual-sight-name').value.trim();
+    const cat = document.getElementById('manual-sight-cat').value;
+    if (!name) return;
+
+    const baseLat = hotelLocation ? hotelLocation.lat : 15.4989;
+    const baseLng = hotelLocation ? hotelLocation.lng : 73.8342;
+    const offsetLat = (Math.random() - 0.5) * 0.05;
+    const offsetLng = (Math.random() - 0.5) * 0.05;
+
+    const place = {
+      id: 'm-' + Math.random().toString(36).substr(2, 9),
+      name: name,
+      lat: baseLat + offsetLat,
+      lng: baseLng + offsetLng,
+      rating: (4.0 + Math.random() * 1.0).toFixed(1),
+      photo: 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=400&q=80',
+      hours: '24 Hours',
+      category: cat,
+      estTime: 90,
+      description: 'Manually logged sightseeing spot.'
+    };
+
+    importedSights.push(place);
+    document.getElementById('manual-sight-name').value = '';
+    renderImportedSightsList();
+    showToast('➕ Sight Added', `${name} added successfully!`, 'success');
+  });
+
+  // Generate clusters trigger button
+  document.getElementById('btn-generate-clusters').addEventListener('click', () => {
+    const activeTrip = state.getActiveTrip();
+    if (!activeTrip || activeTrip.destinations.length === 0) return;
+
+    const numClusters = Math.min(activeTrip.destinations.length, activeTrip.days);
+    const clustered = kMeansClustering(activeTrip.destinations, numClusters);
     
-    // Create loading modal overlay
-    const overlay = document.createElement('div');
-    overlay.className = 'overlay active';
-    overlay.style.zIndex = '3000';
-    overlay.innerHTML = `
-      <div class="modal" style="text-align: center;">
-        <h2 style="margin-bottom: 12px; color: var(--primary);">🤖 TripQuest AI Planner</h2>
-        <div style="font-size: 32px; animation: float 1.5s ease-in-out infinite;">🧭</div>
-        <p style="margin-top: 14px; font-size: 13px; color: var(--text-muted);">
-          Analyzing coordinates, calculating routes, clustering sights, and checking opening hours...
-        </p>
-        <div style="width: 100%; height: 8px; background: #222; border-radius: 4px; overflow: hidden; margin-top: 16px;">
-          <div id="ai-progress-bar" style="width: 0%; height: 100%; background: var(--primary); transition: width 0.1s;"></div>
-        </div>
+    state.updateActiveTrip({ destinations: clustered });
+    wizardClusters = clustered;
+    
+    renderClustersList();
+    drawClustersOnMap(clustered, activeTrip.hotel);
+    showToast('⚙️ Clusters Built', `Geographic K-Means divided sights into ${numClusters} clusters!`, 'success');
+  });
+
+  // Optimize routes trigger button
+  document.getElementById('btn-optimize-routes').addEventListener('click', () => {
+    const activeTrip = state.getActiveTrip();
+    if (!activeTrip || activeTrip.destinations.length === 0) return;
+
+    const itinerary = {};
+    for (let d = 1; d <= activeTrip.days; d++) {
+      itinerary[d] = [];
+    }
+
+    activeTrip.destinations.forEach(p => {
+      const cid = p.clusterId !== undefined ? p.clusterId : 0;
+      const assignedDay = clusterDayAssignments[cid] || 1;
+      itinerary[assignedDay].push(p);
+    });
+
+    for (let d = 1; d <= activeTrip.days; d++) {
+      const optimized = optimizeRoute(itinerary[d], activeTrip.hotel, true, activeTrip.style);
+      itinerary[d] = optimized;
+    }
+
+    state.updateActiveTrip({ itinerary });
+    renderOptimizationSummaryList();
+
+    if (itinerary[1] && itinerary[1].length > 0) {
+      drawItineraryRoute(itinerary[1]);
+    }
+    showToast('⚡ TSP Route Optimized', 'Route optimization completed relative to Hotel!', 'success');
+  });
+
+  // Copy Lobby room code trigger button
+  document.getElementById('btn-copy-lobby-code').addEventListener('click', () => {
+    const code = document.getElementById('wizard-room-code').innerText;
+    navigator.clipboard.writeText(code).then(() => {
+      showToast('📋 Copied Code', 'Room Code copied to clipboard!', 'success');
+    });
+  });
+
+  // Start trip finish button
+  document.getElementById('btn-wizard-finish').addEventListener('click', () => {
+    state.updateActiveTrip({ started: true });
+    showScreen('screen-room');
+    showTab('home');
+    triggerConfetti();
+    showToast('🚀 Quest Started!', 'Multiplayer travel game started!', 'success');
+  });
+}
+
+function parseGoogleMapsSharedListHTML(html) {
+  const places = [];
+  const placeUrlRegex = /\/maps\/place\/([^/]+)\/@(-?\d+\.\d+),(-?\d+\.\d+)/g;
+  let match;
+  const seenNames = new Set();
+  
+  while ((match = placeUrlRegex.exec(html)) !== null) {
+    const rawName = decodeURIComponent(match[1].replace(/\+/g, ' '));
+    const lat = parseFloat(match[2]);
+    const lng = parseFloat(match[3]);
+    
+    if (lat && lng && !seenNames.has(rawName)) {
+      seenNames.add(rawName);
+      places.push({
+        id: 'gm-' + Math.random().toString(36).substr(2, 9),
+        name: rawName,
+        lat,
+        lng,
+        rating: (4.0 + Math.random() * 1.0).toFixed(1),
+        photo: 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=400&q=80',
+        hours: '24 Hours',
+        category: 'Attractions',
+        estTime: 90,
+        description: 'Imported sight.'
+      });
+    }
+  }
+
+  if (places.length === 0) {
+    const arrayRegex = /\["([^"]+)",(-?\d+\.\d+),(-?\d+\.\d+)\]/g;
+    while ((match = arrayRegex.exec(html)) !== null) {
+      const name = match[1];
+      const lat = parseFloat(match[2]);
+      const lng = parseFloat(match[3]);
+      if (lat && lng && !seenNames.has(name) && name.length < 50 && !name.includes('{')) {
+        seenNames.add(name);
+        places.push({
+          id: 'gm-' + Math.random().toString(36).substr(2, 9),
+          name,
+          lat,
+          lng,
+          rating: (4.0 + Math.random() * 1.0).toFixed(1),
+          photo: 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=400&q=80',
+          hours: '24 Hours',
+          category: 'Attractions',
+          estTime: 90,
+          description: 'Imported sight.'
+        });
+      }
+    }
+  }
+  return places;
+}
+
+function goToWizardStep(step) {
+  wizardStep = step;
+  const stepLabels = [
+    'Create Trip Room',
+    'Add Base Hotel',
+    'Import Shared Lists',
+    'Generate Clusters',
+    'Assign Clusters to Days',
+    'Optimize Routes',
+    'Invite Friends Lobby',
+    'Start Quest Adventure'
+  ];
+  
+  document.getElementById('wizard-title').innerText = stepLabels[step - 1];
+  document.getElementById('wizard-step-label').innerText = `Step ${step} of 8: ${stepLabels[step - 1]}`;
+  document.getElementById('wizard-progress-fill').style.width = (step / 8) * 100 + '%';
+  
+  for (let s = 1; s <= 8; s++) {
+    const panel = document.getElementById(`wizard-step-${s}`);
+    if (panel) {
+      panel.style.display = (s === step) ? 'block' : 'none';
+    }
+  }
+  
+  const nextBtn = document.getElementById('btn-wizard-next');
+  const prevBtn = document.getElementById('btn-wizard-prev');
+  
+  prevBtn.style.visibility = (step === 1) ? 'hidden' : 'visible';
+  nextBtn.style.display = (step === 8) ? 'none' : 'block';
+  
+  const activeTrip = state.getActiveTrip();
+  const isHost = state.user.isHost;
+  
+  if (activeTrip && !isHost && step !== 7) {
+    wizardStep = 7;
+    document.getElementById('wizard-title').innerText = 'Multiplayer Lobby';
+    document.getElementById('wizard-step-label').innerText = 'Waiting for Host...';
+    prevBtn.style.visibility = 'hidden';
+    nextBtn.style.display = 'none';
+    for (let s = 1; s <= 8; s++) {
+      const panel = document.getElementById(`wizard-step-${s}`);
+      if (panel) panel.style.display = (s === 7) ? 'block' : 'none';
+    }
+  }
+
+  const mapDiv = document.getElementById('wizard-map');
+  if (step === 2 || step === 4 || step === 6) {
+    mapDiv.style.display = 'block';
+    if (!wizardMapInstance) {
+      wizardMapInstance = initMap('wizard-map');
+      wizardMapInstance.on('click', (e) => {
+        if (wizardStep === 2) {
+          document.getElementById('hotel-lat-input').value = e.latlng.lat.toFixed(6);
+          document.getElementById('hotel-lng-input').value = e.latlng.lng.toFixed(6);
+          hotelLocation = {
+            name: document.getElementById('hotel-name-input').value.trim() || 'Taj Hotel',
+            lat: e.latlng.lat,
+            lng: e.latlng.lng
+          };
+          drawClustersOnMap([], hotelLocation);
+        }
+      });
+    }
+    
+    setTimeout(() => {
+      wizardMapInstance.invalidateSize();
+      if (step === 2) {
+        const lat = parseFloat(document.getElementById('hotel-lat-input').value) || 15.4989;
+        const lng = parseFloat(document.getElementById('hotel-lng-input').value) || 73.8342;
+        drawClustersOnMap([], { name: document.getElementById('hotel-name-input').value, lat, lng });
+      } else if (step === 4) {
+        drawClustersOnMap(activeTrip.destinations, activeTrip.hotel);
+      } else if (step === 6) {
+        const dayPlaces = activeTrip.itinerary[1] || [];
+        drawItineraryRoute(dayPlaces);
+      }
+    }, 100);
+  } else {
+    mapDiv.style.display = 'none';
+  }
+
+  if (step === 3) {
+    renderImportedSightsList();
+  } else if (step === 4) {
+    renderClustersList();
+  } else if (step === 5) {
+    renderDayAssignmentList();
+  } else if (step === 6) {
+    renderOptimizationSummaryList();
+  } else if (step === 7) {
+    renderLobbyPlayers();
+  }
+}
+
+function validateWizardStep(step) {
+  const activeTrip = state.getActiveTrip();
+  if (step === 1) {
+    const name = document.getElementById('trip-name-input').value.trim();
+    const days = parseInt(document.getElementById('trip-days-input').value);
+    if (!name) {
+      showToast('⚠️ Input Required', 'Please enter a trip name!', 'warning');
+      return false;
+    }
+    if (!days || days < 1 || days > 7) {
+      showToast('⚠️ Input Required', 'Duration must be between 1 and 7 days!', 'warning');
+      return false;
+    }
+    
+    if (!activeTrip) {
+      state.createTrip(name, document.getElementById('trip-date-input').value, days);
+      state.updateActiveTrip({ style: document.getElementById('travel-style-select').value });
+    } else {
+      state.updateActiveTrip({
+        name,
+        days,
+        startDate: document.getElementById('trip-date-input').value,
+        style: document.getElementById('travel-style-select').value
+      });
+    }
+    return true;
+  }
+  
+  if (step === 2) {
+    const hotelName = document.getElementById('hotel-name-input').value.trim();
+    const lat = parseFloat(document.getElementById('hotel-lat-input').value);
+    const lng = parseFloat(document.getElementById('hotel-lng-input').value);
+    if (!hotelName || isNaN(lat) || isNaN(lng)) {
+      showToast('⚠️ Hotel Required', 'Please enter hotel name and coordinates!', 'warning');
+      return false;
+    }
+    hotelLocation = { name: hotelName, lat, lng };
+    state.updateActiveTrip({ hotel: hotelLocation });
+    return true;
+  }
+
+  if (step === 3) {
+    if (importedSights.length === 0) {
+      showToast('⚠️ Destinations Required', 'Please import at least one sight first!', 'warning');
+      return false;
+    }
+    state.updateActiveTrip({ destinations: importedSights });
+    return true;
+  }
+
+  if (step === 4) {
+    if (wizardClusters.length === 0) {
+      showToast('⚠️ Clusters Required', 'Please generate clusters first!', 'warning');
+      return false;
+    }
+    return true;
+  }
+
+  if (step === 5) {
+    const trip = state.getActiveTrip();
+    const numClusters = Math.min(trip.destinations.length, trip.days);
+    for (let c = 0; c < numClusters; c++) {
+      if (clusterDayAssignments[c] === undefined) {
+        showToast('⚠️ Assignment Required', `Please assign Group ${String.fromCharCode(65 + c)} to a day!`, 'warning');
+        return false;
+      }
+    }
+    state.updateActiveTrip({ clusters: clusterDayAssignments });
+    return true;
+  }
+
+  if (step === 6) {
+    if (!activeTrip || !activeTrip.itinerary || Object.keys(activeTrip.itinerary).length === 0) {
+      showToast('⚠️ Optimization Required', 'Please run route optimization first!', 'warning');
+      return false;
+    }
+    return true;
+  }
+
+  return true;
+}
+
+function renderImportedSightsList() {
+  const container = document.getElementById('imported-sights-list');
+  if (!container) return;
+  if (importedSights.length === 0) {
+    container.innerHTML = '<div style="color: var(--text-muted); text-align: center; padding: 6px;">No places imported yet.</div>';
+    return;
+  }
+  
+  container.innerHTML = '';
+  importedSights.forEach((s, idx) => {
+    const item = document.createElement('div');
+    item.style = 'display: flex; justify-content: space-between; align-items: center; padding: 6px 8px; margin-bottom: 4px; background: rgba(0,0,0,0.2); border-radius: 8px;';
+    item.innerHTML = `
+      <span style="font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px;">📍 ${s.name} (${s.category})</span>
+      <button class="btn-delete-imported" data-idx="${idx}" style="background: none; border: none; color: #EF4444; font-weight: bold; cursor: pointer; padding: 2px 6px;">❌</button>
+    `;
+    item.querySelector('.btn-delete-imported').addEventListener('click', (e) => {
+      const i = parseInt(e.target.getAttribute('data-idx'));
+      importedSights.splice(i, 1);
+      renderImportedSightsList();
+    });
+    container.appendChild(item);
+  });
+}
+
+function renderClustersList() {
+  const container = document.getElementById('clusters-display-list');
+  if (!container) return;
+  
+  container.innerHTML = '';
+  const activeTrip = state.getActiveTrip();
+  if (!activeTrip) return;
+  
+  const clusterMap = {};
+  activeTrip.destinations.forEach(d => {
+    const cid = d.clusterId !== undefined ? d.clusterId : 0;
+    if (!clusterMap[cid]) clusterMap[cid] = [];
+    clusterMap[cid].push(d);
+  });
+
+  const clusterColors = ['#FF6B4A', '#3B82F6', '#10B981', '#8B5CF6', '#F59E0B', '#EC4899', '#14B8A6'];
+
+  Object.keys(clusterMap).sort().forEach(cid => {
+    const sights = clusterMap[cid];
+    const color = clusterColors[parseInt(cid) % clusterColors.length];
+    const card = document.createElement('div');
+    card.style = `border-left: 5px solid ${color}; background: rgba(255,255,255,0.05); padding: 8px 12px; border-radius: 8px; margin-bottom: 6px;`;
+    card.innerHTML = `
+      <div style="font-weight: 800; color: ${color}; font-size: 13px;">Group ${String.fromCharCode(65 + parseInt(cid))} (${sights.length} Sights)</div>
+      <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px; word-break: break-all;">
+        ${sights.map(s => s.name).join(', ')}
       </div>
     `;
-    document.body.appendChild(overlay);
+    container.appendChild(card);
+  });
+}
 
-    let progress = 0;
-    const progBar = overlay.querySelector('#ai-progress-bar');
-    const interval = setInterval(() => {
-      progress += 10;
-      if (progBar) progBar.style.width = `${progress}%`;
+function renderDayAssignmentList() {
+  const container = document.getElementById('day-assignment-container');
+  if (!container) return;
+  
+  container.innerHTML = '';
+  const activeTrip = state.getActiveTrip();
+  if (!activeTrip) return;
 
-      if (progress >= 100) {
-        clearInterval(interval);
-        document.body.removeChild(overlay);
+  const clustersSet = new Set();
+  activeTrip.destinations.forEach(d => {
+    if (d.clusterId !== undefined) clustersSet.add(d.clusterId);
+  });
+  
+  const sortedClusters = Array.from(clustersSet).sort();
+  const clusterColors = ['#FF6B4A', '#3B82F6', '#10B981', '#8B5CF6', '#F59E0B', '#EC4899', '#14B8A6'];
 
-        // Generate schedule
-        const daySchedule = generateItinerary(importData.places, days, style);
+  sortedClusters.forEach(cid => {
+    const clusterColor = clusterColors[cid % clusterColors.length];
+    const clusterSights = activeTrip.destinations.filter(d => d.clusterId === cid);
+    const assignedDay = clusterDayAssignments[cid] || (cid + 1);
+    clusterDayAssignments[cid] = assignedDay;
 
-        // Create trip room in State
-        const code = state.createTrip(tripName, date, days, style, importData.places);
-        
-        // Save generated itinerary schedule structure
-        const activeTrip = state.getActiveTrip();
-        if (activeTrip) {
-          activeTrip.itinerary = daySchedule;
-          state.notify();
-        }
+    const card = document.createElement('div');
+    card.style = `background: var(--bg-card-hover); padding: 12px; border-radius: 12px; border: 1.5px solid #28284E;`;
+    
+    let selectOptions = '';
+    for (let d = 1; d <= activeTrip.days; d++) {
+      selectOptions += `<option value="${d}" ${assignedDay === d ? 'selected' : ''}>Day ${d}</option>`;
+    }
 
-        showToast('✨ Quest Map Built', 'Your interactive itinerary was optimized!', 'success');
-        triggerConfetti();
-        showScreen('screen-room');
-        showTab('itinerary');
-      }
-    }, 200);
+    card.innerHTML = `
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+        <span style="font-weight: 800; color: ${clusterColor}; font-size: 14px;">Group ${String.fromCharCode(65 + cid)}</span>
+        <select class="form-select select-cluster-day" data-cid="${cid}" style="width: auto; padding: 4px 8px; font-size: 12px; border-radius: 8px; background: #28284E; color: #FFF; border: none;">
+          ${selectOptions}
+        </select>
+      </div>
+      <p style="font-size: 11px; color: var(--text-muted); line-height: 1.4;">${clusterSights.map(s => s.name).join(', ')}</p>
+    `;
+
+    card.querySelector('.select-cluster-day').addEventListener('change', (e) => {
+      const cidInt = parseInt(e.target.getAttribute('data-cid'));
+      const dayVal = parseInt(e.target.value);
+      clusterDayAssignments[cidInt] = dayVal;
+    });
+
+    container.appendChild(card);
+  });
+}
+
+function renderOptimizationSummaryList() {
+  const container = document.getElementById('optimization-summary-list');
+  if (!container) return;
+  
+  container.innerHTML = '';
+  const activeTrip = state.getActiveTrip();
+  if (!activeTrip || !activeTrip.itinerary || Object.keys(activeTrip.itinerary).length === 0) {
+    container.innerHTML = '<div style="color: var(--text-muted); text-align: center; padding: 12px; font-size: 12px;">No optimized routes found. Click the button above to calculate routes!</div>';
+    return;
+  }
+
+  // Draw tabs to switch preview day
+  const tabSelector = document.createElement('div');
+  tabSelector.style = 'display: flex; gap: 6px; margin-bottom: 10px; overflow-x: auto;';
+  
+  Object.keys(activeTrip.itinerary).forEach((dayNum, idx) => {
+    const tabBtn = document.createElement('button');
+    tabBtn.className = `btn ${idx === 0 ? 'btn-primary' : 'btn-secondary'}`;
+    tabBtn.style = 'padding: 6px 12px; font-size: 11px; width: auto; box-shadow: none;';
+    tabBtn.innerText = `Day ${dayNum}`;
+    tabBtn.addEventListener('click', () => {
+      tabSelector.querySelectorAll('button').forEach(b => {
+        b.className = 'btn btn-secondary';
+      });
+      tabBtn.className = 'btn btn-primary';
+      drawItineraryRoute(activeTrip.itinerary[dayNum]);
+    });
+    tabSelector.appendChild(tabBtn);
+  });
+  container.appendChild(tabSelector);
+
+  Object.entries(activeTrip.itinerary).forEach(([dayNum, sights]) => {
+    const card = document.createElement('div');
+    card.style = 'background: rgba(0,0,0,0.15); border: 1.5px solid #28284E; border-radius: 10px; padding: 10px; margin-bottom: 8px;';
+    
+    const count = sights.filter(s => s.id !== 'hotel-start' && s.id !== 'hotel-end').length;
+    let totalDist = 0;
+    sights.forEach(s => {
+      if (s.distanceFromPrev) totalDist += s.distanceFromPrev;
+    });
+
+    const sequence = sights.map(s => {
+      if (s.id === 'hotel-start') return '🏨 Start';
+      if (s.id === 'hotel-end') return '🏨 Return';
+      return s.name;
+    }).join(' ➔ ');
+
+    card.innerHTML = `
+      <div style="font-weight: bold; font-size: 13px; display: flex; justify-content: space-between;">
+        <span>Day ${dayNum} Route Map</span>
+        <span style="color: var(--primary); font-size: 11px;">${count} sights • ${totalDist.toFixed(1)} km</span>
+      </div>
+      <p style="font-size: 11px; color: var(--text-muted); margin-top: 4px; line-height: 1.4; word-break: break-all;">
+        ${sequence}
+      </p>
+    `;
+    container.appendChild(card);
+  });
+}
+
+function renderLobbyPlayers() {
+  const container = document.getElementById('lobby-players-list');
+  if (!container) return;
+  
+  container.innerHTML = '';
+  const activeTrip = state.getActiveTrip();
+  if (!activeTrip) return;
+
+  document.getElementById('wizard-room-code').innerText = activeTrip.code;
+
+  activeTrip.members.forEach(p => {
+    const item = document.createElement('div');
+    item.style = 'display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: rgba(0,0,0,0.2); border-radius: 10px; margin-bottom: 4px;';
+    item.innerHTML = `
+      <span style="font-size: 20px;">${p.avatar}</span>
+      <div style="flex: 1;">
+        <div style="font-weight: bold; font-size: 13px; color: #FFF;">${p.name} ${p.id === state.user.id ? '(You)' : ''}</div>
+        <div style="font-size: 10px; color: var(--text-muted);">${p.team} Team</div>
+      </div>
+      <span style="font-size: 10px; background: var(--success); color: #FFF; padding: 2px 6px; border-radius: 10px; font-weight: bold;">Lobby</span>
+    `;
+    container.appendChild(item);
   });
 }
 
@@ -396,6 +1040,90 @@ function updateHeaderUI(trip, user) {
     leaveBtn.style.display = 'flex';
   } else {
     leaveBtn.style.display = 'none';
+  }
+}
+
+function bindHomeEvents() {
+  document.getElementById('btn-quick-chat').addEventListener('click', () => showTab('chat'));
+  document.getElementById('btn-quick-spin').addEventListener('click', () => {
+    showTab('play');
+    const subnavBtns = document.querySelectorAll('.quest-subnav-btn');
+    if (subnavBtns[1]) subnavBtns[1].click();
+  });
+  document.getElementById('btn-quick-bingo').addEventListener('click', () => {
+    showTab('play');
+    const subnavBtns = document.querySelectorAll('.quest-subnav-btn');
+    if (subnavBtns[0]) subnavBtns[0].click();
+  });
+  document.getElementById('btn-quick-media').addEventListener('click', () => {
+    const sunsetUrl = 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?auto=format&fit=crop&w=400&q=80';
+    state.addGalleryPhoto(sunsetUrl, 'Chilling at the beach! 🌊', state.user.name, 'Beach');
+    showToast('📸 Sunset Uploaded', 'Sunset photo added to Group Memories!', 'success');
+    triggerConfetti();
+  });
+}
+
+function populateHomeUI(trip, user) {
+  document.getElementById('home-trip-name').innerText = trip.name;
+  document.getElementById('home-trip-dates').innerText = `Starts: ${trip.startDate} • ${trip.days} Days`;
+  
+  // Update scores
+  const redScore = trip.teams?.Red?.score || 0;
+  const blueScore = trip.teams?.Blue?.score || 0;
+  document.getElementById('home-red-score').innerText = `${redScore} XP`;
+  document.getElementById('home-blue-score').innerText = `${blueScore} XP`;
+  
+  // Progress bar
+  const totalScore = redScore + blueScore;
+  const fillWidth = totalScore > 0 ? (redScore / totalScore) * 100 : 50;
+  document.getElementById('home-xp-fill').style.width = fillWidth + '%';
+  
+  const leadingText = redScore > blueScore ? 'Team Red leads the quest!' : redScore < blueScore ? 'Team Blue leads the quest!' : 'Teams are tied!';
+  document.getElementById('home-xp-leading').innerText = leadingText;
+
+  // Challenge Card
+  const challengeCard = document.getElementById('home-challenge-content');
+  if (trip.activeChallenge) {
+    const act = trip.activeChallenge;
+    challengeCard.innerHTML = `
+      <span style="font-size: 32px;">${act.icon}</span>
+      <div>
+        <h4 style="font-size: 14px; font-weight: bold; color: #FFF;">${act.title}</h4>
+        <p style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Assigned to: <b>${act.assignedToName}</b> (+${act.points} XP)</p>
+      </div>
+    `;
+  } else {
+    challengeCard.innerHTML = `
+      <span style="font-size: 32px;">🎡</span>
+      <div>
+        <h4 style="font-size: 14px; font-weight: bold; color: #FFF;">No Active Challenge</h4>
+        <p style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Head to the Spin Wheel tab to assign a challenge!</p>
+      </div>
+    `;
+  }
+
+  // Next Destination
+  const dayPlaces = trip.itinerary[activeDay] || [];
+  const nextPlace = dayPlaces.find(p => !p.completed && p.id !== 'hotel-start' && p.id !== 'hotel-end');
+
+  if (nextPlace) {
+    document.getElementById('home-next-name').innerText = nextPlace.name;
+    document.getElementById('home-next-time').innerText = `Scheduled: ${nextPlace.time} • ${nextPlace.duration}m (${nextPlace.category})`;
+    
+    const navBtn = document.getElementById('btn-home-navigate');
+    navBtn.style.display = 'block';
+    
+    // Replace old listeners
+    const newNavBtn = navBtn.cloneNode(true);
+    navBtn.parentNode.replaceChild(newNavBtn, navBtn);
+    newNavBtn.addEventListener('click', () => {
+      window.open(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(nextPlace.name)}`, '_blank');
+      showToast('🗺️ Directions Open', `Navigating to ${nextPlace.name}...`, 'success');
+    });
+  } else {
+    document.getElementById('home-next-name').innerText = 'All Done today! 🎉';
+    document.getElementById('home-next-time').innerText = 'No incomplete sights remaining.';
+    document.getElementById('btn-home-navigate').style.display = 'none';
   }
 }
 

@@ -9,7 +9,10 @@ import {
   dbUpdatePlayer, 
   dbAddChatMessage, 
   dbAddGalleryPhoto, 
-  subscribeToTrip 
+  subscribeToTrip,
+  supabaseSignUp,
+  supabaseSignIn,
+  supabaseSignOut
 } from './supabase.js';
 
 class StateManager {
@@ -29,7 +32,7 @@ class StateManager {
     // Active trip code
     this.activeTripCode = localStorage.getItem(this.activeTripKey) || null;
 
-    // Load active trip from Supabase if credentials are cached
+    // Load active trip and handle auth check
     this.initSupabaseConnection();
   }
 
@@ -53,7 +56,23 @@ class StateManager {
 
   async initSupabaseConnection() {
     const client = getSupabaseClient();
-    if (client && this.activeTripCode) {
+    if (client) {
+      try {
+        const { data: { session } } = await client.auth.getSession();
+        if (session && session.user) {
+          this.user.id = session.user.id;
+          this.user.email = session.user.email;
+          this.user.name = session.user.user_metadata?.name || this.user.name || 'Wanderer';
+          this.user.avatar = session.user.user_metadata?.avatar || this.user.avatar || '🦊';
+          this.user.team = session.user.user_metadata?.team || this.user.team || 'Red';
+          localStorage.setItem(this.currentUserKey, JSON.stringify(this.user));
+        }
+      } catch (e) {
+        console.warn('Supabase session initialization check failed:', e);
+      }
+    }
+    
+    if (this.activeTripCode) {
       console.log('Loading active trip details from Supabase:', this.activeTripCode);
       const details = await dbGetTripDetails(this.activeTripCode);
       if (details) {
@@ -72,6 +91,10 @@ class StateManager {
           trip.itinerary = updated.itinerary;
           trip.activeChallenge = updated.active_challenge;
           trip.teams = updated.teams;
+          trip.hotel = updated.hotel;
+          trip.clusters = updated.clusters;
+          trip.started = updated.started;
+          trip.destinations = updated.destinations;
           this.notifyListenersOnly();
         }
       },
@@ -198,7 +221,7 @@ class StateManager {
     this.notify();
   }
 
-  createTrip(name, startDate, days, style, destinations) {
+  createTrip(name, startDate, days) {
     const code = 'QUEST-' + Math.floor(1000 + Math.random() * 9000);
     
     const trip = {
@@ -206,9 +229,12 @@ class StateManager {
       name,
       startDate,
       days: parseInt(days),
-      style, // relaxed, balanced, packed
-      destinations, // Array of places
-      itinerary: {}, // Day-by-day itinerary
+      style: 'balanced', // default pace style
+      destinations: [], // populated during Step 3
+      hotel: null, // populated during Step 2
+      clusters: [], // populated during Step 4
+      itinerary: {}, // populated during Step 6
+      started: false, // populated during Step 8
       members: [
         {
           id: this.user.id,
@@ -221,7 +247,7 @@ class StateManager {
       ],
       bingo: {}, // player_id -> array of 25 booleans
       challenges: [...travelChallenges],
-      activeChallenge: null, // Current active challenge (wheel output)
+      activeChallenge: null, // Current active challenge
       secretMissions: secretMissions.map(m => ({ ...m, completed: false, revealed: false, assignedTo: null })),
       chat: [
         {
@@ -270,6 +296,70 @@ class StateManager {
     
     this.notify();
     return code;
+  }
+
+  updateActiveTrip(fields) {
+    const trip = this.getActiveTrip();
+    if (!trip) return;
+
+    Object.assign(trip, fields);
+    this.saveDB();
+
+    const client = getSupabaseClient();
+    if (client) {
+      dbUpdateTrip(trip.code, fields);
+    }
+    this.notify();
+  }
+
+  async signUpUser(email, password, name, avatar, team, profilePhoto = null) {
+    const data = await supabaseSignUp(email, password, { name, avatar, team, profilePhoto });
+    const user = data.user;
+    this.user = {
+      id: user.id,
+      email: user.email,
+      name: name,
+      avatar: avatar,
+      team: team,
+      profilePhoto: profilePhoto,
+      isHost: false
+    };
+    localStorage.setItem(this.currentUserKey, JSON.stringify(this.user));
+    this.notify();
+    return this.user;
+  }
+
+  async signInUser(email, password) {
+    const data = await supabaseSignIn(email, password);
+    const user = data.user;
+    const meta = user.user_metadata || {};
+    this.user = {
+      id: user.id,
+      email: user.email,
+      name: meta.name || this.user.name || 'Wanderer',
+      avatar: meta.avatar || this.user.avatar || '🦊',
+      team: meta.team || this.user.team || 'Red',
+      profilePhoto: meta.profilePhoto || this.user.profilePhoto || null,
+      isHost: false
+    };
+    localStorage.setItem(this.currentUserKey, JSON.stringify(this.user));
+    this.notify();
+    return this.user;
+  }
+
+  async signOutUser() {
+    await supabaseSignOut();
+    this.user = {
+      id: 'usr_' + Math.random().toString(36).substr(2, 9),
+      name: '',
+      avatar: '🦊',
+      team: 'Red',
+      isHost: false
+    };
+    localStorage.setItem(this.currentUserKey, JSON.stringify(this.user));
+    this.activeTripCode = null;
+    localStorage.removeItem(this.activeTripKey);
+    this.notify();
   }
 
   async joinTrip(code) {
