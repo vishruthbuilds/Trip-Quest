@@ -1,0 +1,17 @@
+{
+  "name": "tripquest",
+  "version": "1.0.0",
+  "description": "Multiplayer Travel Game",
+  "main": "index.html",
+  "scripts": {
+    "dev": "npx http-server ./ -p 3000 -c-1"
+  },
+  "keywords": [
+    "travel",
+    "multiplayer",
+    "game",
+    "itinerary"
+  ],
+  "author": "Antigravity",
+  "license": "ISC"
+}

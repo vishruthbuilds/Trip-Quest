@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TripQuest - Multiplayer Travel Game</title>
+  <link rel="stylesheet" href="style.css">
+  
+  <!-- Leaflet CSS for maps -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" 
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" 
+        crossorigin="" />
+  <!-- Supabase CDN Client library -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+
+  <!-- Mock Mobile Device Frame Wrapper -->
+  <div class="device-wrapper">
+    <div class="device-screen">
+      
+      <!-- Toast Notification Area -->
+      <div id="toast-container" class="toast-container"></div>
+
+      <!-- App Header -->
+      <header class="app-header">
+        <div class="logo-container">
+          <span class="logo-emoji">🧭</span>
+          <div class="logo-text-group">
+            <span class="logo-text">TripQuest</span>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button id="header-supabase-btn" class="header-btn" title="Setup Supabase Backend" style="border-color: var(--accent); color: var(--accent);">⚡</button>
+          <button id="header-help-btn" class="header-btn" title="How to play">❓</button>
+          <button id="header-leave-btn" class="header-btn" title="Leave Trip" style="display: none;">🚪</button>
+        </div>
+      </header>
+
+      <!-- App Views Scroll Container -->
+      <main id="app-content" class="app-content">
+
+        <!-- 1. WELCOME & USER REGISTER SCREEN -->
+        <section id="screen-welcome" class="screen active">
+          <h1>TripQuest 🧭</h1>
+          <p class="subtitle">The multiplayer travel game for planning & exploring with friends!</p>
+          
+          <div class="card">
+            <div class="card-title">🎭 Choose Your Avatar</div>
+            <div class="avatar-grid">
+              <span class="avatar-opt selected" data-avatar="🦊">🦊</span>
+              <span class="avatar-opt" data-avatar="🐼">🐼</span>
+              <span class="avatar-opt" data-avatar="🐯">🐯</span>
+              <span class="avatar-opt" data-avatar="🐸">🐸</span>
+              <span class="avatar-opt" data-avatar="🐙">🐙</span>
+            </div>
+            
+            <div class="form-group">
+              <label class="form-label" for="username-input">Player Nickname</label>
+              <input type="text" id="username-input" class="form-input" placeholder="e.g. AdventureBob" value="Wanderer">
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Select Team</label>
+              <div class="team-selector">
+                <button type="button" class="team-btn Red selected" data-team="Red">🔴 Team Red</button>
+                <button type="button" class="team-btn Blue" data-team="Blue">🔵 Team Blue</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-group" style="margin-top: 10px;">
+            <button id="btn-goto-host" class="btn btn-primary">Create Trip (Host) 🚀</button>
+            <button id="btn-goto-join" class="btn btn-secondary" style="margin-top: 12px;">Join Existing Trip Room 🔑</button>
+          </div>
+        </section>
+
+        <!-- 2. JOIN ROOM SCREEN -->
+        <section id="screen-join" class="screen">
+          <h1>Join Quest Room 🚪</h1>
+          <p class="subtitle">Enter the unique code shared by your Trip Host.</p>
+          
+          <div class="card">
+            <div class="form-group">
+              <label class="form-label" for="join-code-input">4-Digit Trip Code</label>
+              <input type="text" id="join-code-input" class="form-input" placeholder="e.g. QUEST-2027" style="text-align: center; font-size: 22px; letter-spacing: 2px;">
+            </div>
+            
+            <button id="btn-submit-join" class="btn btn-primary">Connect to Trip Room ✨</button>
+          </div>
+          
+          <button id="btn-join-back" class="btn btn-text">← Go Back</button>
+        </section>
+
+        <!-- 3. HOST CREATOR & IMPORT SCREEN -->
+        <section id="screen-host" class="screen">
+          <h1>Plan Your Quest 🚀</h1>
+          <p class="subtitle">Import from Google Maps and configure your game itinerary.</p>
+
+          <!-- Google OAuth Sim -->
+          <div class="card" id="google-auth-card">
+            <div class="card-title">🔐 Google Integration</div>
+            <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 12px;">
+              Connect your Google Account to import saved places lists directly from Google Maps.
+            </p>
+            <button id="btn-google-login" class="btn btn-secondary" style="background: #fff; color: #1E1E2E; font-weight: bold; border: 1px solid #CCC; box-shadow: 0 4px 0 #E2E8F0;">
+              <img src="https://upload.wikimedia.org/wikipedia/commons/c/c1/Google_%22G%22_logo.svg" alt="G" style="width: 18px; height: 18px; margin-right: 8px;" />
+              Sign in with Google
+            </button>
+          </div>
+
+          <!-- Saved Lists Selector -->
+          <div class="card" id="list-picker-card" style="display: none;">
+            <div class="card-title">📍 Import Maps Saved Lists</div>
+            <div id="maps-lists-container">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+
+          <!-- Trip details -->
+          <div class="card">
+            <div class="card-title">🗓️ Trip Parameters</div>
+            <div class="form-group">
+              <label class="form-label" for="trip-name-input">Trip Name</label>
+              <input type="text" id="trip-name-input" class="form-input" placeholder="Goa Trip 2027" value="Adventure Quest">
+            </div>
+
+            <div class="form-group" style="display: flex; gap: 12px;">
+              <div style="flex: 1;">
+                <label class="form-label" for="trip-days-input">Days</label>
+                <input type="number" id="trip-days-input" class="form-input" value="3" min="1" max="7">
+              </div>
+              <div style="flex: 1;">
+                <label class="form-label" for="trip-date-input">Start Date</label>
+                <input type="date" id="trip-date-input" class="form-input" value="2026-06-10">
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label" for="travel-style-select">Travel Pace Style</label>
+              <select id="travel-style-select" class="form-select">
+                <option value="relaxed">Relaxed (2 sights/day, easy pace)</option>
+                <option value="balanced" selected>Balanced (3-4 sights/day, standard)</option>
+                <option value="packed">Packed (5+ sights/day, jam-packed)</option>
+              </select>
+            </div>
+          </div>
+
+          <button id="btn-generate-itinerary" class="btn btn-primary">Generate Smart Itinerary ✨</button>
+          <button id="btn-host-back" class="btn btn-text">← Go Back</button>
+        </section>
+
+        <!-- 4. TRIP ROOM DASHBOARD (MAIN SCREEN) -->
+        <section id="screen-room" class="screen">
+          
+          <!-- Itinerary Tab -->
+          <div id="section-itinerary" class="map-view-container">
+            <div class="tab-section-title">
+              <span>🗺️ Active Itinerary Route</span>
+              <span id="room-code-tag" style="margin-left: auto; font-size: 11px; background: var(--primary); padding: 2px 8px; border-radius: 12px; font-weight: 800;">CODE: -</span>
+            </div>
+
+            <!-- Leaflet Map Container -->
+            <div id="map" class="map-pane"></div>
+
+            <!-- Day tabs -->
+            <div id="day-tabs-container" class="day-tab-selector">
+              <!-- Rendered via JS -->
+            </div>
+
+            <!-- Itinerary timeline list -->
+            <div id="itinerary-list-container" class="itinerary-scroller">
+              <!-- Rendered via JS -->
+            </div>
+
+            <!-- Simulation Controller for local showcase -->
+            <div class="card" style="margin-top: 10px; padding: 12px; margin-bottom: 0;">
+              <div style="font-weight: 800; font-size: 12px; margin-bottom: 6px; display: flex; align-items: center; justify-content: space-between;">
+                <span>🛠️ Travel Simulator Controls</span>
+                <span style="font-size: 10px; color: var(--text-muted);">Local Showcase</span>
+              </div>
+              <div style="display: flex; gap: 8px;">
+                <button id="btn-sim-delay" class="btn btn-secondary" style="font-size: 11px; padding: 8px; box-shadow: 0 2px 0 #1D4ED8;">Simulate 2 Hr Delay ⏰</button>
+                <button id="btn-sim-member" class="btn btn-accent" style="font-size: 11px; padding: 8px; box-shadow: 0 2px 0 #6D28D9;">Simulate Friend Join 👥</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Play/Quest Hub Tab -->
+          <div id="section-play" class="quest-pane">
+            <div class="tab-section-title">🎮 Quest Game Center</div>
+            
+            <div class="quest-subnav">
+              <div class="quest-subnav-btn active" data-pane="bingo">Bingo</div>
+              <div class="quest-subnav-btn" data-pane="wheel">Spin Wheel</div>
+              <div class="quest-subnav-btn" data-pane="missions">Missions</div>
+            </div>
+
+            <!-- Subpane A: Bingo -->
+            <div id="pane-bingo" class="quest-pane-sub active">
+              <p style="font-size: 11px; color: var(--text-muted); text-align: center; margin-bottom: 12px;">
+                Check off squares as you travel. Complete a row, column, or diagonal for bonus XP!
+              </p>
+              <div id="bingo-container"></div>
+            </div>
+
+            <!-- Subpane B: Spin Wheel -->
+            <div id="pane-wheel" class="quest-pane-sub" style="display: none;">
+              <p style="font-size: 11px; color: var(--text-muted); text-align: center; margin-bottom: 12px;">
+                Spin the wheel to randomly assign an active challenge to a group member!
+              </p>
+              
+              <div class="wheel-container">
+                <div class="wheel-indicator"></div>
+                <canvas id="spinCanvas" width="280" height="280"></canvas>
+              </div>
+
+              <div class="form-group">
+                <label class="form-label" for="wheel-challenge-select">Select Challenge to Assign</label>
+                <select id="wheel-challenge-select" class="form-select">
+                  <!-- Rendered via JS -->
+                </select>
+              </div>
+
+              <button id="btn-spin-wheel" class="btn btn-accent">Spin The Wheel! 🎡</button>
+
+              <div id="spin-result-container"></div>
+              
+              <!-- Active challenge display -->
+              <div id="active-challenge-card" class="card" style="display: none; margin-top: 16px; border-color: var(--primary);">
+                <!-- Rendered via JS -->
+              </div>
+            </div>
+
+            <!-- Subpane C: Secret Missions -->
+            <div id="pane-missions" class="quest-pane-sub" style="display: none;">
+              <p style="font-size: 11px; color: var(--text-muted); text-align: center; margin-bottom: 12px;">
+                Complete your assigned hidden mission on the trip and claim XP!
+              </p>
+              <div id="missions-container"></div>
+            </div>
+          </div>
+
+          <!-- Chat Tab -->
+          <div id="section-chat" class="chat-container" style="display: none;">
+            <div class="tab-section-title">💬 Live Room Chat</div>
+            
+            <div id="chat-scroller" class="chat-scroller">
+              <!-- Rendered via JS -->
+            </div>
+
+            <div class="chat-input-bar">
+              <input type="text" id="chat-input" placeholder="Type a message or share plans...">
+              <button id="chat-send-btn" class="chat-send-btn">➔</button>
+            </div>
+          </div>
+
+          <!-- Memories Tab -->
+          <div id="section-memories" class="chat-container" style="display: none;">
+            <div class="tab-section-title">📸 Media Gallery & Memories</div>
+            
+            <!-- Upload Simulation Panel -->
+            <div class="upload-bar">
+              <button id="btn-mock-photo-beach" class="btn btn-secondary" style="font-size: 11px; padding: 10px; flex: 1;">🌅 Upload Sunset</button>
+              <button id="btn-mock-photo-food" class="btn btn-accent" style="font-size: 11px; padding: 10px; flex: 1;">🍛 Upload Food Pic</button>
+            </div>
+
+            <div id="gallery-grid" class="gallery-grid">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+
+          <!-- Leaderboard Tab -->
+          <div id="section-leaderboard" class="chat-container" style="display: none;">
+            <div class="tab-section-title">🏆 Scoreboards & Badges</div>
+
+            <!-- Team Scores -->
+            <div class="team-score-cards">
+              <div class="team-card Red">
+                <div style="font-weight: 800; font-size: 13px;">🔴 Team Red</div>
+                <div id="team-red-score" class="team-score">100 XP</div>
+              </div>
+              <div class="team-card Blue">
+                <div style="font-weight: 800; font-size: 13px;">🔵 Team Blue</div>
+                <div id="team-blue-score" class="team-score">0 XP</div>
+              </div>
+            </div>
+
+            <!-- Player List -->
+            <div class="card" style="padding: 16px;">
+              <div style="font-weight: 800; font-size: 14px; margin-bottom: 12px; color: var(--text-muted);">Player Standings</div>
+              <div id="leaderboard-list" class="leaderboard-list">
+                <!-- Rendered via JS -->
+              </div>
+            </div>
+          </div>
+
+        </section>
+
+      </main>
+
+      <!-- Bottom Navigation (Only visible inside Room) -->
+      <nav id="bottom-nav" class="bottom-nav" style="display: none;">
+        <div class="nav-item active" data-tab="itinerary">
+          <span class="nav-icon">🗺️</span>
+          <span>Itinerary</span>
+        </div>
+        <div class="nav-item" data-tab="play">
+          <span class="nav-icon">🎮</span>
+          <span>Play</span>
+        </div>
+        <div class="nav-item" data-tab="chat">
+          <span class="nav-icon">💬</span>
+          <span>Chat</span>
+        </div>
+        <div class="nav-item" data-tab="memories">
+          <span class="nav-icon">📸</span>
+          <span>Memories</span>
+        </div>
+        <div class="nav-item" data-tab="leaderboard">
+          <span class="nav-icon">🏆</span>
+          <span>Standings</span>
+        </div>
+      </nav>
+
+    </div>
+  </div>
+
+  <!-- Supabase Setup Overlay Modal -->
+  <div id="supabase-overlay" class="overlay">
+    <div class="modal" style="text-align: left; max-width: 380px;">
+      <div class="modal-header">⚡ Supabase Backend Setup</div>
+      <div class="modal-body" style="text-align: left; max-height: 420px; overflow-y: auto; scrollbar-width: none;">
+        <p style="margin-bottom: 12px; font-size: 12px; color: var(--text-muted);">
+          Enter your Supabase credentials to synchronize TripQuest in real-time across devices. Leave empty to use local fallback mode.
+        </p>
+
+        <div class="form-group">
+          <label class="form-label" for="supabase-url-input">Project URL</label>
+          <input type="text" id="supabase-url-input" class="form-input" placeholder="https://xxxx.supabase.co">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="supabase-anon-input">API Anon Key</label>
+          <input type="password" id="supabase-anon-input" class="form-input" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...">
+        </div>
+
+        <div id="supabase-status-text" style="font-size: 11px; font-weight: bold; margin-bottom: 12px; color: var(--warning);">
+          Status: Local Fallback Mode
+        </div>
+
+        <div style="font-size: 11px; border: 1px dashed var(--text-muted); padding: 8px; border-radius: 8px; background: rgba(0,0,0,0.1); margin-bottom: 12px;">
+          <div style="font-weight: bold; margin-bottom: 4px;">SQL Table Creation:</div>
+          Copy the SQL script and run it in the Supabase SQL editor to create the required tables.
+          <button id="btn-copy-sql" class="btn" style="padding: 4px 8px; font-size: 10px; margin-top: 6px; width: auto; background: #28284E; color: #fff; box-shadow: none;">Copy SQL Script 📋</button>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-supabase-close" class="btn" style="flex: 1; background: #333; color: #fff;">Close</button>
+        <button id="btn-supabase-save" class="btn btn-primary" style="flex: 1;">Connect! 🔌</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delay Adjuster Overlay Modal -->
+  <div id="delay-overlay" class="overlay">
+    <div class="modal">
+      <div class="modal-header">⏰ Schedule Delay Detected!</div>
+      <div id="delay-modal-body" class="modal-body">
+        It looks like you are running late at Baga Beach by 2 hours. Would you like to recalculate your upcoming destinations to avoid missing opening hours?
+      </div>
+      <div class="modal-actions">
+        <button id="btn-delay-cancel" class="btn" style="flex: 1; background: #333; color: #fff;">Ignore</button>
+        <button id="btn-delay-confirm" class="btn btn-primary" style="flex: 1;">Recalculate! ⚡</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Help Overlay Modal -->
+  <div id="help-overlay" class="overlay">
+    <div class="modal" style="text-align: left;">
+      <div class="modal-header">🧭 TripQuest Rules</div>
+      <div class="modal-body" style="text-align: left; max-height: 400px; overflow-y: auto;">
+        <p style="margin-bottom: 10px;"><b>1. Itinerary Planning:</b> Import lists or define them. We group them to minimize travel time.</p>
+        <p style="margin-bottom: 10px;"><b>2. Real-Time Sync:</b> Open TripQuest in another tab or browser window, join the same Room Code, and experience instant updates!</p>
+        <p style="margin-bottom: 10px;"><b>3. Travel Bingo:</b> Everyone gets a bingo card. Check off items during the trip to score XP for your team.</p>
+        <p style="margin-bottom: 10px;"><b>4. Spin Wheel:</b> Draw challenges and spin the wheel to randomly assign them to players. Complete them to score big points!</p>
+        <p style="margin-bottom: 10px;"><b>5. Secret Missions:</b> Assigned privately. Complete them, then hit Claim to surprise your friends!</p>
+      </div>
+      <button id="btn-help-close" class="btn btn-primary">Let's Play! 🚀</button>
+    </div>
+  </div>
+
+  <!-- Canvas Confetti Library -->
+  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+
+  <!-- Leaflet JS for maps -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+          crossorigin=""></script>
+
+  <!-- Application Entry script -->
+  <script type="module" src="js/app.js"></script>
+
+</body>
+</html>
