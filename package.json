@@ -5,7 +5,7 @@
   "main": "index.html",
   "scripts": {
     "dev": "npx http-server ./ -p 3000 -c-1",
-    "build": "mkdir -p public && cp index.html style.css public && cp -r js public"
+    "build": "mkdir -p public && cp index.html style.css manifest.json sw.js icon.svg public && cp -r js public"
   },
   "keywords": [
     "travel",

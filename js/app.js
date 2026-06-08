@@ -15,6 +15,13 @@ document.addEventListener('DOMContentLoaded', () => {
   // Initialize Cross-Tab synchronization
   initializeSync();
 
+  // Register Service Worker for PWA installability
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./sw.js')
+      .then(reg => console.log('Service Worker registered successfully!', reg))
+      .catch(err => console.warn('Service Worker registration failed:', err));
+  }
+
   // Create SpinWheel Instance
   spinWheel = new SpinWheel('spinCanvas', 'btn-spin-wheel', 'spin-result-container');
 
