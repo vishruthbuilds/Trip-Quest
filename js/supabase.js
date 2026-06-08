@@ -1,410 +1,527 @@
-// Supabase Database and Real-time Subscription Manager
-let supabaseClient = null;
-let activeChannels = [];
+// ═══════════════════════════════════════════════════════════
+// TripQuest · Supabase Interface
+// Handles: client init, auth (Google + email), database ops
+// ═══════════════════════════════════════════════════════════
 
-export const supabaseConfig = {
-  urlKey: 'tripquest_supabase_url',
-  anonKey: 'tripquest_supabase_anon_key',
-  
-  getCredentials() {
-    return {
-      url: localStorage.getItem(this.urlKey) || '',
-      key: localStorage.getItem(this.anonKey) || ''
-    };
-  },
-  
-  saveCredentials(url, key) {
-    if (url && key) {
-      localStorage.setItem(this.urlKey, url.trim());
-      localStorage.setItem(this.anonKey, key.trim());
-    } else {
-      localStorage.removeItem(this.urlKey);
-      localStorage.removeItem(this.anonKey);
-    }
-  }
-};
+let _client = null;
 
-export function getSupabaseClient() {
-  if (supabaseClient) return supabaseClient;
-  
-  const creds = supabaseConfig.getCredentials();
-  if (creds.url && creds.key && window.supabase) {
-    try {
-      supabaseClient = window.supabase.createClient(creds.url, creds.key);
-      return supabaseClient;
-    } catch (e) {
-      console.error('Error initializing Supabase client:', e);
-      return null;
-    }
-  }
-  return null;
+/* ── Credential Storage ── */
+const CREDS_URL = 'tripquest_supabase_url';
+const CREDS_KEY = 'tripquest_supabase_anon_key';
+
+export function saveCredentials(url, key) {
+  localStorage.setItem(CREDS_URL, url.trim());
+  localStorage.setItem(CREDS_KEY, key.trim());
+  _client = null; // force re-init
 }
 
+export function getCredentials() {
+  return {
+    url: localStorage.getItem(CREDS_URL) || '',
+    key: localStorage.getItem(CREDS_KEY) || ''
+  };
+}
+
+/* ── Client Init ── */
+export function getClient() {
+  if (_client) return _client;
+  const { url, key } = getCredentials();
+  if (!url || !key || !window.supabase) return null;
+  try {
+    _client = window.supabase.createClient(url, key, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true // critical for OAuth redirect
+      }
+    });
+    return _client;
+  } catch (e) {
+    console.error('[Supabase] Client init failed:', e);
+    return null;
+  }
+}
+
+export function isConnected() {
+  const { url, key } = getCredentials();
+  return !!(url && key);
+}
+
+/* ── Test Connection ── */
 export async function testConnection(url, key) {
-  if (!window.supabase) return { success: false, message: 'Supabase library not loaded yet!' };
+  if (!window.supabase) return { ok: false, message: 'Supabase library not loaded.' };
   try {
     const testClient = window.supabase.createClient(url.trim(), key.trim());
-    // Try a simple read from trips table to check auth/URL validity
-    const { data, error } = await testClient.from('trips').select('code').limit(1);
-    
-    if (error && error.code !== 'PGRST116') { // PGRST116 is 'no rows returned', which means table exists and auth works!
-      return { success: false, message: error.message };
+    // Lightweight check — just verify auth config is accessible
+    const { error } = await testClient.from('profiles').select('id').limit(1);
+    if (error && error.code !== 'PGRST116' && error.code !== '42P01') {
+      // 42P01 = table doesn't exist yet (schema not run) — still counts as connected
+      return { ok: false, message: error.message };
     }
-    
-    // Auth works, cache keys
-    supabaseConfig.saveCredentials(url, key);
-    supabaseClient = testClient;
-    return { success: true };
+    saveCredentials(url, key);
+    _client = testClient;
+    return { ok: true };
   } catch (e) {
-    return { success: false, message: e.message || 'Network error connecting to Supabase.' };
+    return { ok: false, message: e.message || 'Network error.' };
   }
 }
 
-export function disconnectSupabase() {
-  unsubscribeAll();
-  supabaseClient = null;
-  supabaseConfig.saveCredentials('', '');
+/* ══════════════════════════════════════════════════
+   AUTHENTICATION
+══════════════════════════════════════════════════ */
+
+/** Get current session (restores from URL hash on OAuth redirect too) */
+export async function getSession() {
+  const client = getClient();
+  if (!client) return null;
+  try {
+    const { data: { session } } = await client.auth.getSession();
+    return session;
+  } catch (e) {
+    console.warn('[Auth] getSession failed:', e);
+    return null;
+  }
 }
 
-export function unsubscribeAll() {
-  activeChannels.forEach(channel => {
-    try {
-      channel.unsubscribe();
-    } catch (e) {
-      console.warn('Error unsubscribing channel:', e);
+/** Listen for auth state changes (SIGNED_IN, SIGNED_OUT, etc.) */
+export function onAuthChange(callback) {
+  const client = getClient();
+  if (!client) return () => {};
+  const { data: { subscription } } = client.auth.onAuthStateChange((event, session) => {
+    callback(event, session);
+  });
+  return () => subscription.unsubscribe();
+}
+
+/** Google OAuth — redirects to Google, then back to app */
+export async function signInWithGoogle() {
+  const client = getClient();
+  if (!client) throw new Error('Supabase not configured. Please set up the backend first.');
+  const { error } = await client.auth.signInWithOAuth({
+    provider: 'google',
+    options: {
+      redirectTo: window.location.origin,
+      queryParams: { access_type: 'offline', prompt: 'consent' }
     }
   });
-  activeChannels = [];
+  if (error) throw error;
 }
 
-/* REAL-TIME SUBSCRIPTIONS */
+/** Email + password sign in */
+export async function signInWithEmail(email, password) {
+  const client = getClient();
+  if (!client) {
+    // Local fallback (no Supabase)
+    return localSignIn(email, password);
+  }
+  const { data, error } = await client.auth.signInWithPassword({ email, password });
+  if (error) throw error;
+  return data.session;
+}
 
-export function subscribeToTrip(tripCode, callbacks) {
-  const client = getSupabaseClient();
-  if (!client) return;
+/** Email + password sign up */
+export async function signUpWithEmail(email, password) {
+  const client = getClient();
+  if (!client) {
+    return localSignUp(email, password);
+  }
+  const { data, error } = await client.auth.signUp({ email, password });
+  if (error) throw error;
+  return data.session;
+}
 
-  unsubscribeAll();
+/** Sign out */
+export async function signOut() {
+  const client = getClient();
+  if (client) {
+    await client.auth.signOut();
+  }
+  // Always clear local session too
+  localStorage.removeItem('tq_local_session');
+}
 
-  // Create a channel for real-time Postgres changes filtered by tripCode
-  const channel = client.channel(`trip-room:${tripCode}`)
-    // Listen to trip updates (itinerary, active challenge, team scores)
-    .on('postgres_changes', {
-      event: 'UPDATE',
-      schema: 'public',
-      table: 'trips',
-      filter: `code=eq.${tripCode}`
-    }, payload => {
-      if (callbacks.onTripUpdate) callbacks.onTripUpdate(payload.new);
-    })
-    // Listen to changes in players (leaderboard, bingo)
-    .on('postgres_changes', {
-      event: '*',
-      schema: 'public',
-      table: 'players',
-      filter: `trip_code=eq.${tripCode}`
-    }, payload => {
-      if (callbacks.onPlayersChange) callbacks.onPlayersChange(payload);
-    })
-    // Listen to new chat messages
+/* ── Local Auth Fallback (when Supabase not configured) ── */
+function getLocalAccounts() {
+  try { return JSON.parse(localStorage.getItem('tq_local_accounts') || '{}'); }
+  catch { return {}; }
+}
+function saveLocalAccounts(a) { localStorage.setItem('tq_local_accounts', JSON.stringify(a)); }
+
+function makeLocalSession(userId, email) {
+  const session = { user: { id: userId, email, user_metadata: {}, app_metadata: {} } };
+  localStorage.setItem('tq_local_session', JSON.stringify(session));
+  return session;
+}
+
+export function getLocalSession() {
+  try { return JSON.parse(localStorage.getItem('tq_local_session')); }
+  catch { return null; }
+}
+
+function localSignUp(email, password) {
+  const accounts = getLocalAccounts();
+  const key = email.toLowerCase().trim();
+  if (accounts[key]) throw new Error('Account already exists. Try logging in.');
+  const id = 'local_' + Math.random().toString(36).slice(2, 10);
+  accounts[key] = { password, id };
+  saveLocalAccounts(accounts);
+  return makeLocalSession(id, key);
+}
+
+function localSignIn(email, password) {
+  const accounts = getLocalAccounts();
+  const key = email.toLowerCase().trim();
+  const account = accounts[key];
+  if (!account || account.password !== password) {
+    throw new Error('Invalid email or password.');
+  }
+  return makeLocalSession(account.id, key);
+}
+
+/* ══════════════════════════════════════════════════
+   PROFILES TABLE
+══════════════════════════════════════════════════ */
+
+/** Check if a profile exists for this user */
+export async function getProfile(userId) {
+  const client = getClient();
+  if (!client) {
+    // Local fallback
+    try {
+      const raw = localStorage.getItem(`tq_profile_${userId}`);
+      return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+  }
+  const { data, error } = await client
+    .from('profiles')
+    .select('*')
+    .eq('id', userId)
+    .maybeSingle();
+  if (error) { console.warn('[DB] getProfile error:', error); return null; }
+  return data;
+}
+
+/** Create profile for first-time user */
+export async function createProfile(userId, displayName, profilePhoto) {
+  const profileData = {
+    id: userId,
+    display_name: displayName,
+    profile_photo: profilePhoto || null,
+    is_admin: false
+  };
+
+  const client = getClient();
+  if (!client) {
+    // Local fallback
+    localStorage.setItem(`tq_profile_${userId}`, JSON.stringify({
+      id: userId,
+      display_name: displayName,
+      profile_photo: profilePhoto || null,
+      is_admin: false
+    }));
+    return profileData;
+  }
+
+  const { data, error } = await client
+    .from('profiles')
+    .upsert(profileData)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+/** Update profile */
+export async function updateProfile(userId, fields) {
+  const client = getClient();
+  if (!client) {
+    // Local fallback
+    const existing = JSON.parse(localStorage.getItem(`tq_profile_${userId}`) || '{}');
+    const updated = { ...existing, ...fields };
+    localStorage.setItem(`tq_profile_${userId}`, JSON.stringify(updated));
+    return updated;
+  }
+  const { data, error } = await client
+    .from('profiles')
+    .update(fields)
+    .eq('id', userId)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+/* ══════════════════════════════════════════════════
+   TRIPS TABLE
+══════════════════════════════════════════════════ */
+
+/** Get the most recently published trip */
+export async function getPublishedTrip() {
+  const client = getClient();
+  if (!client) {
+    // Local fallback
+    try {
+      const raw = localStorage.getItem('tq_active_trip');
+      return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+  }
+  const { data, error } = await client
+    .from('trips')
+    .select('*')
+    .eq('published', true)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) { console.warn('[DB] getPublishedTrip error:', error); return null; }
+  return data;
+}
+
+/** Get all trips (admin use) */
+export async function getAllTrips() {
+  const client = getClient();
+  if (!client) {
+    try {
+      const raw = localStorage.getItem('tq_all_trips');
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  }
+  const { data, error } = await client
+    .from('trips')
+    .select('*')
+    .order('created_at', { ascending: false });
+  if (error) return [];
+  return data || [];
+}
+
+/** Create or update a trip (admin) */
+export async function saveTrip({ id, name, description, startDate, published = false }) {
+  const tripData = {
+    name,
+    description: description || null,
+    start_date: startDate || null,
+    published
+  };
+
+  const client = getClient();
+  if (!client) {
+    // Local fallback
+    const saved = { ...tripData, id: id || ('trip_' + Date.now()) };
+    localStorage.setItem('tq_active_trip', JSON.stringify(saved));
+    return saved;
+  }
+
+  let result;
+  if (id) {
+    const { data, error } = await client
+      .from('trips')
+      .update(tripData)
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) throw error;
+    result = data;
+  } else {
+    const { data, error } = await client
+      .from('trips')
+      .insert(tripData)
+      .select()
+      .single();
+    if (error) throw error;
+    result = data;
+  }
+  return result;
+}
+
+/** Publish a trip */
+export async function publishTrip(tripId) {
+  const client = getClient();
+  if (!client) {
+    // Local fallback
+    const raw = localStorage.getItem('tq_active_trip');
+    if (raw) {
+      const trip = JSON.parse(raw);
+      trip.published = true;
+      localStorage.setItem('tq_active_trip', JSON.stringify(trip));
+      return trip;
+    }
+    throw new Error('No trip found to publish.');
+  }
+  const { data, error } = await client
+    .from('trips')
+    .update({ published: true })
+    .eq('id', tripId)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+/* ══════════════════════════════════════════════════
+   DESTINATIONS TABLE
+══════════════════════════════════════════════════ */
+
+/** Get ordered destinations for a trip */
+export async function getDestinations(tripId) {
+  const client = getClient();
+  if (!client) {
+    try {
+      const raw = localStorage.getItem(`tq_destinations_${tripId}`);
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  }
+  const { data, error } = await client
+    .from('destinations')
+    .select('*')
+    .eq('trip_id', tripId)
+    .order('sort_order', { ascending: true });
+  if (error) { console.warn('[DB] getDestinations error:', error); return []; }
+  return data || [];
+}
+
+/** Save all destinations for a trip (replaces existing) */
+export async function saveDestinations(tripId, destinations) {
+  const client = getClient();
+  if (!client) {
+    // Local fallback
+    const data = destinations.map((d, i) => ({ ...d, trip_id: tripId, sort_order: i, id: d.id || ('dest_' + Date.now() + '_' + i) }));
+    localStorage.setItem(`tq_destinations_${tripId}`, JSON.stringify(data));
+    return data;
+  }
+
+  // Delete existing, then insert new with updated sort_order
+  await client.from('destinations').delete().eq('trip_id', tripId);
+
+  if (destinations.length === 0) return [];
+
+  const rows = destinations.map((d, i) => ({
+    id: d.id && !d.id.startsWith('tmp_') ? d.id : undefined,
+    trip_id: tripId,
+    name: d.name,
+    description: d.description || null,
+    lat: d.lat || null,
+    lng: d.lng || null,
+    maps_url: d.maps_url || null,
+    thumbnail: d.thumbnail || null,
+    sort_order: i
+  }));
+
+  // Remove undefined id fields
+  const cleaned = rows.map(r => {
+    if (!r.id) delete r.id;
+    return r;
+  });
+
+  const { data, error } = await client
+    .from('destinations')
+    .insert(cleaned)
+    .select();
+  if (error) throw error;
+  return data || [];
+}
+
+/* ══════════════════════════════════════════════════
+   CHAT MESSAGES TABLE
+══════════════════════════════════════════════════ */
+
+/** Fetch last N messages for a trip */
+export async function getChatMessages(tripId, limit = 100) {
+  const client = getClient();
+  if (!client) {
+    try {
+      const raw = localStorage.getItem(`tq_chat_${tripId}`);
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  }
+  const { data, error } = await client
+    .from('chat_messages')
+    .select('*')
+    .eq('trip_id', tripId)
+    .order('created_at', { ascending: true })
+    .limit(limit);
+  if (error) { console.warn('[DB] getChatMessages error:', error); return []; }
+  return data || [];
+}
+
+/** Send a chat message */
+export async function sendChatMessage(tripId, userId, displayName, profilePhoto, text) {
+  const msg = {
+    trip_id: tripId,
+    user_id: userId,
+    display_name: displayName,
+    profile_photo: profilePhoto || null,
+    text: text.trim()
+  };
+
+  const client = getClient();
+  if (!client) {
+    // Local fallback — store in localStorage
+    const msgs = (() => {
+      try { return JSON.parse(localStorage.getItem(`tq_chat_${tripId}`) || '[]'); }
+      catch { return []; }
+    })();
+    const newMsg = { ...msg, id: 'local_' + Date.now(), created_at: new Date().toISOString() };
+    msgs.push(newMsg);
+    // Keep last 200
+    if (msgs.length > 200) msgs.splice(0, msgs.length - 200);
+    localStorage.setItem(`tq_chat_${tripId}`, JSON.stringify(msgs));
+    return newMsg;
+  }
+
+  const { data, error } = await client
+    .from('chat_messages')
+    .insert(msg)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+/** Subscribe to new chat messages (real-time) */
+export function subscribeToChatMessages(tripId, onNewMessage) {
+  const client = getClient();
+  if (!client) return () => {}; // No-op unsubscribe
+
+  const channel = client
+    .channel(`chat:${tripId}`)
     .on('postgres_changes', {
       event: 'INSERT',
       schema: 'public',
       table: 'chat_messages',
-      filter: `trip_code=eq.${tripCode}`
-    }, payload => {
-      if (callbacks.onChatMessage) callbacks.onChatMessage(payload.new);
+      filter: `trip_id=eq.${tripId}`
+    }, (payload) => {
+      onNewMessage(payload.new);
     })
-    // Listen to new photo uploads
-    .on('postgres_changes', {
-      event: 'INSERT',
-      schema: 'public',
-      table: 'gallery_photos',
-      filter: `trip_code=eq.${tripCode}`
-    }, payload => {
-      if (callbacks.onPhotoUploaded) callbacks.onPhotoUploaded(payload.new);
-    })
-    .subscribe((status) => {
-      console.log(`Supabase Subscription Status for ${tripCode}:`, status);
-    });
+    .subscribe();
 
-  activeChannels.push(channel);
-}
-
-/* DATABASE ACCESS WRITES */
-
-export async function dbCreateTrip(trip) {
-  const client = getSupabaseClient();
-  if (!client) return null;
-
-  // Insert trip row
-  const { error } = await client.from('trips').insert({
-    code: trip.code,
-    name: trip.name,
-    start_date: trip.startDate,
-    days: trip.days,
-    style: trip.style,
-    destinations: trip.destinations,
-    itinerary: trip.itinerary,
-    active_challenge: trip.activeChallenge,
-    teams: trip.teams,
-    hotel: trip.hotel || null,
-    clusters: trip.clusters || null,
-    started: trip.started || false
-  });
-
-  if (error) throw error;
-  return trip.code;
-}
-
-export async function dbJoinTrip(tripCode, player) {
-  const client = getSupabaseClient();
-  if (!client) return null;
-
-  // Check if player already exists in the room
-  const { data: existing } = await client
-    .from('players')
-    .select('id')
-    .eq('trip_code', tripCode)
-    .eq('id', player.id)
-    .maybeSingle();
-
-  if (!existing) {
-    const { error } = await client.from('players').insert({
-      id: player.id,
-      trip_code: tripCode,
-      name: player.name,
-      avatar: player.avatar,
-      team: player.team,
-      xp: player.xp || 0,
-      level: player.level || 1,
-      bingo_card: Array(25).fill(false),
-      secret_mission_id: player.secretMissionId || '',
-      secret_mission_completed: false
-    });
-    if (error) throw error;
-  }
-}
-
-export async function dbGetTripDetails(tripCode) {
-  const client = getSupabaseClient();
-  if (!client) return null;
-
-  // Fetch trip info
-  const { data: trip, error: tripErr } = await client
-    .from('trips')
-    .select('*')
-    .eq('code', tripCode)
-    .single();
-
-  if (tripErr) return null;
-
-  // Fetch players list
-  const { data: players } = await client
-    .from('players')
-    .select('*')
-    .eq('trip_code', tripCode);
-
-  // Fetch chats
-  const { data: chat } = await client
-    .from('chat_messages')
-    .select('*')
-    .eq('trip_code', tripCode)
-    .order('created_at', { ascending: true })
-    .limit(100);
-
-  // Fetch gallery photos
-  const { data: gallery } = await client
-    .from('gallery_photos')
-    .select('*')
-    .eq('trip_code', tripCode)
-    .order('created_at', { ascending: false });
-
-  // Map to matching client representation
-  return {
-    code: trip.code,
-    name: trip.name,
-    startDate: trip.start_date,
-    days: trip.days,
-    style: trip.style,
-    destinations: trip.destinations,
-    itinerary: trip.itinerary,
-    activeChallenge: trip.active_challenge,
-    teams: trip.teams,
-    hotel: trip.hotel,
-    clusters: trip.clusters,
-    started: trip.started,
-    members: (players || []).map(p => ({
-      id: p.id,
-      name: p.name,
-      avatar: p.avatar,
-      team: p.team,
-      xp: p.xp,
-      level: p.level,
-      secretMissionId: p.secret_mission_id,
-      secretMissionCompleted: p.secret_mission_completed
-    })),
-    bingo: (players || []).reduce((acc, p) => {
-      acc[p.id] = p.bingo_card;
-      return acc;
-    }, {}),
-    chat: (chat || []).map(c => ({
-      id: c.id,
-      sender: c.sender,
-      avatar: c.avatar,
-      text: c.text,
-      timestamp: new Date(c.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    })),
-    gallery: (gallery || []).map(g => ({
-      id: g.id,
-      url: g.url,
-      caption: g.caption,
-      uploadedBy: g.uploaded_by,
-      category: g.category,
-      timestamp: new Date(g.created_at).toLocaleDateString()
-    }))
+  return () => {
+    channel.unsubscribe();
+    client.removeChannel(channel);
   };
 }
 
-export async function dbUpdateTrip(tripCode, fields) {
-  const client = getSupabaseClient();
-  if (!client) return;
+/** Subscribe to destination changes (real-time — admin publishes, all see it) */
+export function subscribeToItinerary(tripId, onUpdate) {
+  const client = getClient();
+  if (!client) return () => {};
 
-  const updateObj = {};
-  if (fields.itinerary !== undefined) updateObj.itinerary = fields.itinerary;
-  if (fields.activeChallenge !== undefined) updateObj.active_challenge = fields.activeChallenge;
-  if (fields.teams !== undefined) updateObj.teams = fields.teams;
-  if (fields.hotel !== undefined) updateObj.hotel = fields.hotel;
-  if (fields.clusters !== undefined) updateObj.clusters = fields.clusters;
-  if (fields.started !== undefined) updateObj.started = fields.started;
-  if (fields.destinations !== undefined) updateObj.destinations = fields.destinations;
+  const channel = client
+    .channel(`itinerary:${tripId}`)
+    .on('postgres_changes', {
+      event: '*',
+      schema: 'public',
+      table: 'destinations',
+      filter: `trip_id=eq.${tripId}`
+    }, onUpdate)
+    .on('postgres_changes', {
+      event: 'UPDATE',
+      schema: 'public',
+      table: 'trips',
+      filter: `id=eq.${tripId}`
+    }, onUpdate)
+    .subscribe();
 
-  if (Object.keys(updateObj).length > 0) {
-    const { error } = await client.from('trips').update(updateObj).eq('code', tripCode);
-    if (error) console.error('Error updating Supabase trip:', error);
-  }
+  return () => {
+    channel.unsubscribe();
+    client.removeChannel(channel);
+  };
 }
-
-export async function dbUpdatePlayer(tripCode, playerId, fields) {
-  const client = getSupabaseClient();
-  if (!client) return;
-
-  const updateObj = {};
-  if (fields.name !== undefined) updateObj.name = fields.name;
-  if (fields.avatar !== undefined) updateObj.avatar = fields.avatar;
-  if (fields.team !== undefined) updateObj.team = fields.team;
-  if (fields.xp !== undefined) updateObj.xp = fields.xp;
-  if (fields.level !== undefined) updateObj.level = fields.level;
-  if (fields.bingoCard !== undefined) updateObj.bingo_card = fields.bingoCard;
-  if (fields.secretMissionId !== undefined) updateObj.secret_mission_id = fields.secretMissionId;
-  if (fields.secretMissionCompleted !== undefined) updateObj.secret_mission_completed = fields.secretMissionCompleted;
-
-  if (Object.keys(updateObj).length > 0) {
-    const { error } = await client
-      .from('players')
-      .update(updateObj)
-      .eq('trip_code', tripCode)
-      .eq('id', playerId);
-    if (error) console.error('Error updating Supabase player:', error);
-  }
-}
-
-export async function dbAddChatMessage(tripCode, sender, avatar, text) {
-  const client = getSupabaseClient();
-  if (!client) return;
-
-  const { error } = await client.from('chat_messages').insert({
-    id: 'msg_' + Math.random().toString(36).substr(2, 9),
-    trip_code: tripCode,
-    sender,
-    avatar,
-    text
-  });
-  if (error) console.error('Error adding Supabase chat message:', error);
-}
-
-export async function dbAddGalleryPhoto(tripCode, url, caption, uploadedBy, category) {
-  const client = getSupabaseClient();
-  if (!client) return;
-
-  const { error } = await client.from('gallery_photos').insert({
-    id: 'photo_' + Math.random().toString(36).substr(2, 9),
-    trip_code: tripCode,
-    url,
-    caption,
-    uploaded_by: uploadedBy,
-    category
-  });
-  if (error) console.error('Error adding Supabase gallery photo:', error);
-}
-
-// Local accounts database helpers
-function getLocalAccounts() {
-  const raw = localStorage.getItem('tripquest_local_accounts');
-  return raw ? JSON.parse(raw) : {};
-}
-
-function saveLocalAccounts(accounts) {
-  localStorage.setItem('tripquest_local_accounts', JSON.stringify(accounts));
-}
-
-// SUPABASE & LOCAL AUTH API
-export async function supabaseSignUp(email, password, metadata) {
-  const client = getSupabaseClient();
-  if (!client) {
-    const accounts = getLocalAccounts();
-    const normalizedEmail = email.toLowerCase().trim();
-    if (accounts[normalizedEmail]) {
-      throw new Error('User already exists in local storage database!');
-    }
-    const id = 'usr_' + Math.random().toString(36).substr(2, 9);
-    const userObj = {
-      id,
-      email: normalizedEmail,
-      user_metadata: metadata
-    };
-    accounts[normalizedEmail] = {
-      password,
-      user: userObj
-    };
-    saveLocalAccounts(accounts);
-    return { user: userObj };
-  }
-
-  const { data, error } = await client.auth.signUp({
-    email,
-    password,
-    options: {
-      data: metadata
-    }
-  });
-  if (error) throw error;
-  return data;
-}
-
-export async function supabaseSignIn(email, password) {
-  const client = getSupabaseClient();
-  if (!client) {
-    const accounts = getLocalAccounts();
-    const normalizedEmail = email.toLowerCase().trim();
-    const account = accounts[normalizedEmail];
-    if (!account || account.password !== password) {
-      throw new Error('Invalid email or password!');
-    }
-    return { user: account.user };
-  }
-
-  const { data, error } = await client.auth.signInWithPassword({
-    email,
-    password
-  });
-  if (error) throw error;
-  return data;
-}
-
-export async function supabaseSignOut() {
-  const client = getSupabaseClient();
-  if (client) {
-    await client.auth.signOut();
-  }
-}
-

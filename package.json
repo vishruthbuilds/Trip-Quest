@@ -1,18 +1,13 @@
 {
   "name": "tripquest",
-  "version": "1.0.0",
-  "description": "Multiplayer Travel Game",
+  "version": "2.0.0",
+  "description": "TripQuest — Travel Together",
   "main": "index.html",
   "scripts": {
     "dev": "npx http-server ./ -p 3000 -c-1",
-    "build": "mkdir -p public && cp index.html style.css manifest.json sw.js icon.svg public && cp -r js public"
+    "build": "echo Build complete — serving from root"
   },
-  "keywords": [
-    "travel",
-    "multiplayer",
-    "game",
-    "itinerary"
-  ],
+  "keywords": ["travel", "group", "itinerary", "chat"],
   "author": "Antigravity",
   "license": "ISC"
 }
