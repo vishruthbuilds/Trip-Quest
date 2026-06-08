@@ -5,7 +5,7 @@
   "main": "index.html",
   "scripts": {
     "dev": "npx http-server ./ -p 3000 -c-1",
-    "build": "echo 'Building static files...'"
+    "build": "mkdir -p public && cp index.html style.css public && cp -r js public"
   },
   "keywords": [
     "travel",
