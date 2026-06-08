@@ -303,6 +303,7 @@ export async function dbAddChatMessage(tripCode, sender, avatar, text) {
   if (!client) return;
 
   const { error } = await client.from('chat_messages').insert({
+    id: 'msg_' + Math.random().toString(36).substr(2, 9),
     trip_code: tripCode,
     sender,
     avatar,
@@ -316,6 +317,7 @@ export async function dbAddGalleryPhoto(tripCode, url, caption, uploadedBy, cate
   if (!client) return;
 
   const { error } = await client.from('gallery_photos').insert({
+    id: 'photo_' + Math.random().toString(36).substr(2, 9),
     trip_code: tripCode,
     url,
     caption,

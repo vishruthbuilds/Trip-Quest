@@ -1015,53 +1015,51 @@ function bindSupabaseEvents() {
   // Copy SQL script to clipboard
   btnCopySql.addEventListener('click', () => {
     const sqlScript = `-- Create Trips Table
-CREATE TABLE IF NOT EXISTS public.trips (
+CREATE TABLE trips (
   code text PRIMARY KEY,
   name text NOT NULL,
   start_date date,
-  days integer DEFAULT 1,
+  days integer,
   style text,
-  destinations jsonb DEFAULT '[]'::jsonb,
-  itinerary jsonb DEFAULT '{}'::jsonb,
+  destinations jsonb,
+  itinerary jsonb,
   active_challenge jsonb,
-  teams jsonb DEFAULT '{}'::jsonb,
-  created_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL
+  teams jsonb
 );
 
 -- Create Players Table
-CREATE TABLE IF NOT EXISTS public.players (
+CREATE TABLE players (
   id text PRIMARY KEY,
-  trip_code text REFERENCES public.trips(code) ON DELETE CASCADE,
+  trip_code text REFERENCES trips(code) ON DELETE CASCADE,
   name text NOT NULL,
   avatar text,
   team text,
-  xp integer DEFAULT 0,
-  level integer DEFAULT 1,
-  bingo_card jsonb DEFAULT '[]'::jsonb,
+  xp integer,
+  level integer,
+  bingo_card jsonb,
   secret_mission_id text,
-  secret_mission_completed boolean DEFAULT false,
-  created_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL
+  secret_mission_completed boolean
 );
 
 -- Create Chat Messages Table
-CREATE TABLE IF NOT EXISTS public.chat_messages (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  trip_code text REFERENCES public.trips(code) ON DELETE CASCADE,
+CREATE TABLE chat_messages (
+  id text PRIMARY KEY,
+  trip_code text REFERENCES trips(code) ON DELETE CASCADE,
   sender text NOT NULL,
   avatar text,
-  text text NOT NULL,
-  created_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL
+  text text,
+  created_at timestamp with time zone DEFAULT now()
 );
 
 -- Create Gallery Photos Table
-CREATE TABLE IF NOT EXISTS public.gallery_photos (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  trip_code text REFERENCES public.trips(code) ON DELETE CASCADE,
+CREATE TABLE gallery_photos (
+  id text PRIMARY KEY,
+  trip_code text REFERENCES trips(code) ON DELETE CASCADE,
   url text NOT NULL,
   caption text,
   uploaded_by text,
   category text,
-  created_at timestamp with time zone DEFAULT timezone('utc'::text, now()) NOT NULL
+  created_at timestamp with time zone DEFAULT now()
 );
 
 -- Enable Realtime for all tables
