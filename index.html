@@ -44,13 +44,25 @@
 
       <div class="sidebar-scrollable">
 
-        <!-- Linked Google Account Info -->
-        <div class="user-account-badge">
-          <div class="account-avatar">V</div>
-          <div class="account-info">
-            <span class="account-email">vishruth2026@gmail.com</span>
-            <span class="account-label">Google Account Connected</span>
+        <!-- Google Takeout Import Section -->
+        <div class="takeout-import-banner">
+          <div class="takeout-banner-top">
+            <span class="takeout-icon">📤</span>
+            <div class="takeout-text">
+              <span class="takeout-title">Import from Google Maps</span>
+              <span class="takeout-subtitle">Upload your Google Takeout export to load your real saved lists.</span>
+            </div>
           </div>
+          <div class="takeout-steps">
+            <span>1. Go to <a href="https://takeout.google.com" target="_blank" class="takeout-link">takeout.google.com</a></span>
+            <span>2. Select <b>Maps (your places)</b> only</span>
+            <span>3. Export &amp; upload the JSON file below</span>
+          </div>
+          <label for="takeout-file-input" class="btn takeout-upload-btn">
+            <input type="file" id="takeout-file-input" accept=".json" style="display:none;">
+            📂 Upload Takeout JSON
+          </label>
+          <div id="takeout-status" class="takeout-status"></div>
         </div>
 
         <!-- Section: Real-Time Tracker -->
@@ -113,13 +125,11 @@
             <h2>Saved Places (<span id="saved-count">0</span>)</h2>
           </div>
           
-          <!-- Google Maps Saved Lists Selector -->
-          <div class="card lists-select-card">
-            <label class="form-label" for="gmaps-list-select">Google Maps Saved Lists</label>
+          <!-- Imported Lists Selector -->
+          <div class="card lists-select-card" id="list-selector-card" style="display:none;">
+            <label class="form-label" for="gmaps-list-select">Your Google Maps Lists</label>
             <select id="gmaps-list-select" class="form-input select-list-dropdown">
-              <option value="beaches_forts">⭐️ Goa Beaches & Forts</option>
-              <option value="cafes_restaurants">☕ Goa Cafes & Restaurants</option>
-              <option value="south_goa">🏛️ South Goa Cultural Sites</option>
+              <!-- Populated dynamically after Takeout import -->
             </select>
           </div>
 

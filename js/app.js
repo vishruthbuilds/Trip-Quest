@@ -7,31 +7,9 @@ import {
   loadActiveTrip, saveActiveTrip, loadDestinations, saveDestinations
 } from './supabase.js';
 
-// ── Google Maps Preloaded Saved Lists ──────────────────────
-const SimulatedSavedLists = {
-  beaches_forts: [
-    { name: 'Baga Beach', lat: 15.5523, lng: 73.7771, category: 'Attraction' },
-    { name: 'Calangute Beach', lat: 15.5414, lng: 73.7632, category: 'Attraction' },
-    { name: 'Fort Aguada', lat: 15.4923, lng: 73.7731, category: 'Attraction' },
-    { name: 'Chapora Fort', lat: 15.6067, lng: 73.7358, category: 'Attraction' },
-    { name: 'Vagator Beach', lat: 15.6025, lng: 73.7344, category: 'Attraction' },
-    { name: 'Anjuna Beach', lat: 15.5782, lng: 73.7424, category: 'Attraction' }
-  ],
-  cafes_restaurants: [
-    { name: 'Curlies Beach Shack', lat: 15.5731, lng: 73.7431, category: 'Cafe' },
-    { name: 'Brittos Restaurant', lat: 15.5562, lng: 73.7744, category: 'Restaurant' },
-    { name: 'Gunpowder Goa', lat: 15.5947, lng: 73.7538, category: 'Restaurant' },
-    { name: 'Thalassa Vagator', lat: 15.5982, lng: 73.7411, category: 'Restaurant' },
-    { name: 'Artjuna Cafe', lat: 15.5843, lng: 73.7461, category: 'Cafe' }
-  ],
-  south_goa: [
-    { name: 'Basilica of Bom Jesus', lat: 15.5009, lng: 73.9116, category: 'Attraction' },
-    { name: 'Se Cathedral', lat: 15.5031, lng: 73.9128, category: 'Attraction' },
-    { name: 'Mangueshi Temple', lat: 15.4439, lng: 73.9688, category: 'Attraction' },
-    { name: 'Colva Beach', lat: 15.2709, lng: 73.9144, category: 'Attraction' },
-    { name: 'Palolem Beach', lat: 15.0100, lng: 74.0228, category: 'Attraction' }
-  ]
-};
+// ── Real Takeout Data Store (populated after user uploads JSON) ────────────
+// Maps list name → array of place objects { name, lat, lng, category, maps_url }
+const TakeoutLists = {};
 
 // ── In-Memory Application State ──────────────────────────
 const State = {
@@ -106,10 +84,18 @@ async function loadState() {
     State.days = ['Day 1', 'Day 2', 'Day 3'];
   }
 
-  // Sync saved list from dropdown selection
-  const listSelect = document.getElementById('gmaps-list-select');
-  const selectedListKey = listSelect ? listSelect.value : 'beaches_forts';
-  State.importedPlaces = [...SimulatedSavedLists[selectedListKey]];
+  // Restore previously imported places from localStorage if any
+  try {
+    const rawPlaces = localStorage.getItem('tq_imported_places');
+    if (rawPlaces) State.importedPlaces = JSON.parse(rawPlaces);
+    const rawTakeout = localStorage.getItem('tq_takeout_lists');
+    if (rawTakeout) {
+      const parsed = JSON.parse(rawTakeout);
+      Object.assign(TakeoutLists, parsed);
+      // Rebuild list selector dropdown
+      buildListSelectorDropdown();
+    }
+  } catch (e) { /* ignore */ }
 
   // Load trip and destinations from Supabase or localStorage
   const activeTrip = await loadActiveTrip();
@@ -1163,17 +1149,175 @@ function updateActiveStopUI(status, forceMapDraw = true) {
   }
 }
 
+// ── Google Takeout JSON Parser ────────────────────────────
+/**
+ * Parses a Google Takeout Maps JSON file (GeoJSON FeatureCollection format)
+ * and populates TakeoutLists.
+ * 
+ * Supports:
+ *  - Individual list files: Saved Places.json, Want to go.json, etc.
+ *  - Multi-list Takeout zip containing many JSON files (user uploads one at a time)
+ */
+function parseTakeoutJSON(jsonText, fileName) {
+  const statusEl = document.getElementById('takeout-status');
+
+  let data;
+  try {
+    data = JSON.parse(jsonText);
+  } catch (e) {
+    throw new Error('Invalid JSON file. Make sure to upload a .json file from Google Takeout.');
+  }
+
+  // Detect format: GeoJSON FeatureCollection
+  if (data.type !== 'FeatureCollection' || !Array.isArray(data.features)) {
+    throw new Error('File is not a Google Takeout Maps export. Expected a GeoJSON FeatureCollection.');
+  }
+
+  // Derive the list name from the file name (strip .json) or from data.title
+  const listName = (data.title && data.title.trim()) 
+    || fileName.replace(/\.json$/i, '').trim() 
+    || 'Imported List';
+
+  // Guess category from list name
+  const categoryGuess = guessCategoryFromListName(listName);
+
+  const places = [];
+  data.features.forEach(feature => {
+    try {
+      const props = feature.properties || {};
+      const geo = feature.geometry;
+
+      // Name: prefer Business Name > Title > Location name
+      const name = props.Location?.['Business Name'] 
+        || props.Title 
+        || props.name 
+        || 'Unknown Place';
+
+      // Coordinates: prefer Geo Coordinates > geometry coordinates
+      let lat = null, lng = null;
+      if (props.Location?.['Geo Coordinates']) {
+        lat = parseFloat(props.Location['Geo Coordinates']['Latitude']);
+        lng = parseFloat(props.Location['Geo Coordinates']['Longitude']);
+      } else if (geo?.type === 'Point' && Array.isArray(geo.coordinates)) {
+        // GeoJSON convention: [longitude, latitude]
+        lng = geo.coordinates[0];
+        lat = geo.coordinates[1];
+      }
+
+      if (!name || !lat || !lng || isNaN(lat) || isNaN(lng)) return;
+
+      const mapsUrl = props['Google Maps URL'] || props.url || '';
+      const address = props.Location?.Address || '';
+
+      places.push({ name, lat, lng, category: categoryGuess, maps_url: mapsUrl, address });
+    } catch (e) {
+      // Skip malformed features
+    }
+  });
+
+  if (places.length === 0) {
+    throw new Error(`No valid places with coordinates found in "${listName}". Make sure this list has saved places with location data.`);
+  }
+
+  // Store in TakeoutLists
+  TakeoutLists[listName] = places;
+
+  // Persist to localStorage so it survives page refreshes
+  localStorage.setItem('tq_takeout_lists', JSON.stringify(TakeoutLists));
+
+  // Rebuild dropdown and auto-select the just-uploaded list
+  buildListSelectorDropdown(listName);
+
+  // Load the imported list into the pool immediately
+  State.importedPlaces = [...places];
+  localStorage.setItem('tq_imported_places', JSON.stringify(State.importedPlaces));
+  renderSavedPlacesPool();
+
+  // Show success
+  statusEl.textContent = `✅ Loaded "${listName}" — ${places.length} places imported!`;
+  statusEl.className = 'takeout-status success';
+
+  showToast(`📥 "${listName}" imported with ${places.length} places!`, 'success', 4000);
+}
+
+function guessCategoryFromListName(name) {
+  const lower = name.toLowerCase();
+  if (lower.includes('cafe') || lower.includes('coffee')) return 'Cafe';
+  if (lower.includes('meal') || lower.includes('food') || lower.includes('restaurant') || lower.includes('eat')) return 'Restaurant';
+  if (lower.includes('stay') || lower.includes('hotel') || lower.includes('resort')) return 'Hotel';
+  if (lower.includes('party') || lower.includes('event') || lower.includes('activity')) return 'Activity';
+  return 'Attraction';
+}
+
+/**
+ * Rebuilds the list selector <select> with all currently loaded TakeoutLists.
+ * Optionally pre-selects the given listName.
+ */
+function buildListSelectorDropdown(selectListName = null) {
+  const select = document.getElementById('gmaps-list-select');
+  const card = document.getElementById('list-selector-card');
+  if (!select) return;
+
+  const listNames = Object.keys(TakeoutLists);
+  if (listNames.length === 0) {
+    if (card) card.style.display = 'none';
+    return;
+  }
+
+  select.innerHTML = '';
+  listNames.forEach(name => {
+    const option = document.createElement('option');
+    option.value = name;
+    option.textContent = `${getCategoryEmoji(TakeoutLists[name][0]?.category)} ${name} (${TakeoutLists[name].length})`;
+    select.appendChild(option);
+  });
+
+  if (selectListName && listNames.includes(selectListName)) {
+    select.value = selectListName;
+  }
+
+  if (card) card.style.display = 'block';
+}
+
+function getCategoryEmoji(category) {
+  const map = { Attraction: '🎯', Cafe: '☕', Restaurant: '🍜', Hotel: '🏨', Activity: '🏄', Custom: '📍' };
+  return map[category] || '📍';
+}
+
 // ── Event Bindings ────────────────────────────────────────
 function bindEvents() {
   document.getElementById('btn-import').addEventListener('click', importFromInput);
   document.getElementById('trip-name').addEventListener('change', saveTripDetails);
 
-  // Saved List selector change
+  // Saved List selector change (after Takeout loaded)
   document.getElementById('gmaps-list-select').addEventListener('change', (e) => {
     const listKey = e.target.value;
-    State.importedPlaces = [...SimulatedSavedLists[listKey]];
+    const places = TakeoutLists[listKey] || [];
+    State.importedPlaces = [...places];
+    localStorage.setItem('tq_imported_places', JSON.stringify(State.importedPlaces));
     renderSavedPlacesPool();
-    showToast(`Loaded list "${e.target.options[e.target.selectedIndex].text}"!`, 'info');
+    const label = e.target.options[e.target.selectedIndex]?.text || listKey;
+    showToast(`Loaded "${label}" (${places.length} places)`, 'success');
+  });
+
+  // Google Takeout JSON file upload
+  document.getElementById('takeout-file-input').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const statusEl = document.getElementById('takeout-status');
+    statusEl.textContent = 'Reading file...';
+    statusEl.className = 'takeout-status';
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        parseTakeoutJSON(event.target.result, file.name);
+      } catch (err) {
+        statusEl.textContent = '❌ Failed to read file: ' + err.message;
+        statusEl.className = 'takeout-status error';
+      }
+    };
+    reader.readAsText(file);
   });
 
   // Add new day

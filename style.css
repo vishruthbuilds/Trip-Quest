@@ -153,55 +153,120 @@ input:focus, textarea:focus, select:focus {
   color: var(--text-muted);
 }
 
-/* ── Connected Account Badge ── */
-.user-account-badge {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  background: linear-gradient(135deg, rgba(59, 130, 246, 0.1) 0%, rgba(139, 92, 246, 0.1) 100%);
-  border: 1px solid rgba(59, 130, 246, 0.25);
-  padding: 12px 16px;
+/* ── Google Takeout Import Banner ── */
+.takeout-import-banner {
+  background: linear-gradient(135deg, rgba(255, 107, 74, 0.08) 0%, rgba(139, 92, 246, 0.08) 100%);
+  border: 1px solid rgba(255, 107, 74, 0.25);
+  padding: 14px 16px;
   border-radius: var(--radius-lg);
-  margin-bottom: 4px;
-  flex-shrink: 0;
-}
-
-.account-avatar {
-  width: 36px;
-  height: 36px;
-  background: var(--secondary);
-  color: #FFF;
-  font-size: 16px;
-  font-weight: 700;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  border: 2px solid rgba(255,255,255,0.1);
-}
-
-.account-info {
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  gap: 12px;
 }
 
-.account-email {
+.takeout-banner-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.takeout-icon {
+  font-size: 22px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.takeout-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.takeout-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.takeout-subtitle {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.takeout-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: rgba(0,0,0,0.2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+.takeout-steps span {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.takeout-steps b {
+  color: var(--text);
+}
+
+.takeout-link {
+  color: var(--secondary);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.takeout-link:hover {
+  text-decoration: underline;
+}
+
+.takeout-upload-btn {
+  background: var(--primary);
+  color: #FFF;
+  border-radius: var(--radius-sm);
+  padding: 9px 16px;
   font-size: 13px;
   font-weight: 600;
-  color: var(--text);
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  overflow: hidden;
+  cursor: pointer;
+  text-align: center;
+  transition: background 0.2s;
 }
 
-.account-label {
-  font-size: 10px;
-  color: var(--secondary);
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+.takeout-upload-btn:hover {
+  background: var(--primary-hover);
+}
+
+.takeout-status {
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  padding: 4px 0;
+}
+
+.takeout-status.success {
+  color: var(--success);
+}
+
+.takeout-status.error {
+  color: var(--danger);
+}
+
+/* Loaded lists (shown after Takeout import) */
+.loaded-lists-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  color: var(--success);
+  font-weight: 600;
 }
 
 /* ── Cards ── */
