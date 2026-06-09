@@ -7,20 +7,51 @@ import {
   loadActiveTrip, saveActiveTrip, loadDestinations, saveDestinations
 } from './supabase.js';
 
+// ── Google Maps Preloaded Saved Lists ──────────────────────
+const SimulatedSavedLists = {
+  beaches_forts: [
+    { name: 'Baga Beach', lat: 15.5523, lng: 73.7771, category: 'Attraction' },
+    { name: 'Calangute Beach', lat: 15.5414, lng: 73.7632, category: 'Attraction' },
+    { name: 'Fort Aguada', lat: 15.4923, lng: 73.7731, category: 'Attraction' },
+    { name: 'Chapora Fort', lat: 15.6067, lng: 73.7358, category: 'Attraction' },
+    { name: 'Vagator Beach', lat: 15.6025, lng: 73.7344, category: 'Attraction' },
+    { name: 'Anjuna Beach', lat: 15.5782, lng: 73.7424, category: 'Attraction' }
+  ],
+  cafes_restaurants: [
+    { name: 'Curlies Beach Shack', lat: 15.5731, lng: 73.7431, category: 'Cafe' },
+    { name: 'Brittos Restaurant', lat: 15.5562, lng: 73.7744, category: 'Restaurant' },
+    { name: 'Gunpowder Goa', lat: 15.5947, lng: 73.7538, category: 'Restaurant' },
+    { name: 'Thalassa Vagator', lat: 15.5982, lng: 73.7411, category: 'Restaurant' },
+    { name: 'Artjuna Cafe', lat: 15.5843, lng: 73.7461, category: 'Cafe' }
+  ],
+  south_goa: [
+    { name: 'Basilica of Bom Jesus', lat: 15.5009, lng: 73.9116, category: 'Attraction' },
+    { name: 'Se Cathedral', lat: 15.5031, lng: 73.9128, category: 'Attraction' },
+    { name: 'Mangueshi Temple', lat: 15.4439, lng: 73.9688, category: 'Attraction' },
+    { name: 'Colva Beach', lat: 15.2709, lng: 73.9144, category: 'Attraction' },
+    { name: 'Palolem Beach', lat: 15.0100, lng: 74.0228, category: 'Attraction' }
+  ]
+};
+
 // ── In-Memory Application State ──────────────────────────
 const State = {
   trip: { id: 'local_trip_id', name: 'My Goa Itinerary' },
+  days: ['Day 1', 'Day 2', 'Day 3'], // Day-wise separation
+  activeDayIndex: 0,                 // Currently selected day (0 = Day 1)
   importedPlaces: [], // List of places available to add
-  destinations: [],   // Active itinerary list
-  isSimulating: false,
-  simulatedMinutes: 720, // 12:00 PM
+  destinations: [],   // Active itinerary list across all days
   map: null,
   markersLayer: null,
   routeLine: null,
-  activeStopIndex: null,
+  activeStopIndex: null, // Relative to activeDayIndex
   isTransit: false,
   transitFrom: null,
-  transitTo: null
+  transitTo: null,
+  
+  // Real-time alarm tracking
+  alarmDismissedStopId: null,
+  alarmSnoozedUntil: null,
+  lastNotifiedStopId: null
 };
 
 // Category colors for Leaflet markers
@@ -44,14 +75,19 @@ const CategoryEmojis = {
 
 // ── Boot Application ──────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
+  // Request Notification permission
+  if ('Notification' in window && Notification.permission !== 'granted' && Notification.permission !== 'denied') {
+    Notification.requestPermission();
+  }
+
   // 1. Initial State Load
   await loadState();
 
   // 2. Bind UI Event Listeners
   bindEvents();
 
-  // 3. Initialize Leaflet Map
-  initLeafletMap();
+  // 3. Initialize Leaflet Map with Google roadmap tiles
+  initGoogleLeafletMap();
 
   // 4. Render Initial Views
   renderAll();
@@ -62,13 +98,18 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 // ── Load & Save State ─────────────────────────────────────
 async function loadState() {
-  // Load saved places pool
+  // Load saved days structure
   try {
-    const rawSaved = localStorage.getItem('tq_imported_places');
-    State.importedPlaces = rawSaved ? JSON.parse(rawSaved) : [];
+    const rawDays = localStorage.getItem('tq_itinerary_days');
+    State.days = rawDays ? JSON.parse(rawDays) : ['Day 1', 'Day 2', 'Day 3'];
   } catch (e) {
-    State.importedPlaces = [];
+    State.days = ['Day 1', 'Day 2', 'Day 3'];
   }
+
+  // Sync saved list from dropdown selection
+  const listSelect = document.getElementById('gmaps-list-select');
+  const selectedListKey = listSelect ? listSelect.value : 'beaches_forts';
+  State.importedPlaces = [...SimulatedSavedLists[selectedListKey]];
 
   // Load trip and destinations from Supabase or localStorage
   const activeTrip = await loadActiveTrip();
@@ -84,9 +125,10 @@ async function loadState() {
   const dests = await loadDestinations(State.trip.id);
   State.destinations = dests || [];
   
-  // Backwards compatibility/fallback: ensure all destinations have duration and category
+  // Backward compatibility: ensure all destinations have day_index and duration
   State.destinations.forEach((d, idx) => {
     if (!d.id) d.id = 'dest_' + idx + '_' + Date.now();
+    if (d.day_index === undefined) d.day_index = 0;
     if (!d.duration) d.duration = 90;
     if (!d.category) d.category = 'Attraction';
   });
@@ -100,7 +142,7 @@ async function saveTripDetails() {
 }
 
 async function saveItineraryState() {
-  // Recalculate timings sequentially starting from the first stop's time
+  // Recalculate timings sequentially starting from the first stop of the active day
   recalculateScheduleTimings();
 
   // Save to Database / LocalStorage
@@ -131,7 +173,6 @@ function parseTimeToMinutes(timeStr) {
   if (!timeStr) return 540; // Default 9:00 AM
   const match = timeStr.match(/^(\d+):(\d+)\s*(AM|PM)$/i);
   if (!match) {
-    // Fallback: Try reading HH:MM 24h format
     const match24 = timeStr.match(/^(\d{1,2}):(\d{2})$/);
     if (match24) {
       return parseInt(match24[1]) * 60 + parseInt(match24[2]);
@@ -152,41 +193,42 @@ function getCurrentMinutesFromMidnight() {
 }
 
 /** 
- * Automatically sequences all stops sequentially starting from the first stop's time.
+ * Automatically sequences stops for the CURRENT ACTIVE DAY sequentially.
  * Calculates transit times between consecutive stops.
  */
 function recalculateScheduleTimings() {
-  if (State.destinations.length === 0) return;
+  const activeDests = State.destinations.filter(d => d.day_index === State.activeDayIndex);
+  if (activeDests.length === 0) return;
 
   // Set the start time of the first stop to whatever is currently entered
-  let currentTime = parseTimeToMinutes(State.destinations[0].time);
-  State.destinations[0].time = formatMinutes(currentTime);
+  let currentTime = parseTimeToMinutes(activeDests[0].time);
+  activeDests[0].time = formatMinutes(currentTime);
 
-  for (let i = 0; i < State.destinations.length; i++) {
-    const stop = State.destinations[i];
+  for (let i = 0; i < activeDests.length; i++) {
+    const stop = activeDests[i];
     
-    // Assign calculated start time to this stop
     stop.time = formatMinutes(currentTime);
-    
-    // Add visit duration
     const duration = parseInt(stop.duration) || 60;
     
-    if (i < State.destinations.length - 1) {
-      // Calculate transit time to the next stop
-      const nextStop = State.destinations[i + 1];
-      const dist = haversineKm(stop.lat, stop.lng, nextStop.lat, nextStop.lng);
-      const isWalking = dist < 1.2;
-      // walking speed ~5km/h = 12min/km, driving speed ~30km/h = 2min/km
-      const speed = isWalking ? 5 : 30;
-      const transitMins = Math.max(5, Math.round((dist / speed) * 60));
+    if (i < activeDests.length - 1) {
+      const nextStop = activeDests[i + 1];
       
-      // Update next stop's start time by adding duration + transit buffer
+      // Use cached road transit duration if available, else fall back to Haversine estimate
+      let transitMins = 15;
+      if (stop.roadTransitDuration) {
+        transitMins = Math.max(3, Math.round(stop.roadTransitDuration));
+      } else {
+        const dist = haversineKm(stop.lat, stop.lng, nextStop.lat, nextStop.lng);
+        const transit = estimateTransit(dist);
+        transitMins = transit.mins;
+      }
+      
       currentTime += duration + transitMins;
     }
   }
 }
 
-// ── Geodesic Distance Helpers ─────────────────────────────
+// ── Geodesic Distance Fallback Helpers ─────────────────────
 function haversineKm(lat1, lng1, lat2, lng2) {
   if (!lat1 || !lng1 || !lat2 || !lng2) return 0;
   const R = 6371; // Earth radius
@@ -215,7 +257,55 @@ function estimateTransit(km) {
 // ── UI Rendering ──────────────────────────────────────────
 function renderAll() {
   renderSavedPlacesPool();
+  renderDayTabs();
   renderTimeline();
+}
+
+function renderDayTabs() {
+  const container = document.getElementById('day-tabs-container');
+  if (!container) return;
+
+  container.innerHTML = '';
+  State.days.forEach((dayName, idx) => {
+    const tab = document.createElement('button');
+    tab.className = `day-tab ${idx === State.activeDayIndex ? 'active' : ''}`;
+    tab.textContent = dayName;
+    
+    tab.addEventListener('click', () => {
+      State.activeDayIndex = idx;
+      renderDayTabs();
+      renderTimeline();
+      drawRouteOnMap();
+    });
+    
+    // Double click to delete day
+    tab.addEventListener('dblclick', () => {
+      if (State.days.length <= 1) {
+        showToast('You must have at least one day in your trip.', 'warning');
+        return;
+      }
+      if (confirm(`Delete ${dayName} and all its stops?`)) {
+        // Remove day name
+        State.days.splice(idx, 1);
+        
+        // Remove all destinations for this day
+        State.destinations = State.destinations.filter(d => d.day_index !== idx);
+        
+        // Shift higher day indices down
+        State.destinations.forEach(d => {
+          if (d.day_index > idx) d.day_index -= 1;
+        });
+
+        // Set active day to previous or first
+        State.activeDayIndex = Math.max(0, idx - 1);
+        localStorage.setItem('tq_itinerary_days', JSON.stringify(State.days));
+        saveItineraryState();
+        renderDayTabs();
+      }
+    });
+
+    container.appendChild(tab);
+  });
 }
 
 function renderSavedPlacesPool() {
@@ -282,16 +372,22 @@ function renderTimeline() {
   const container = document.getElementById('timeline-list');
   if (!container) return;
 
-  if (State.destinations.length === 0) {
-    container.innerHTML = '<div class="timeline-empty-hint">Add places from your Saved Places pool.</div>';
+  // Filter stops by the currently active day
+  const activeDests = State.destinations.filter(d => d.day_index === State.activeDayIndex);
+
+  if (activeDests.length === 0) {
+    container.innerHTML = '<div class="timeline-empty-hint">Add places from your Saved Places pool to this day.</div>';
     return;
   }
 
   container.innerHTML = '';
-  State.destinations.forEach((stop, idx) => {
+  activeDests.forEach((stop, idx) => {
+    // Find index of this stop in the global array
+    const globalIdx = State.destinations.findIndex(d => d.id === stop.id);
+
     const wrapper = document.createElement('div');
     wrapper.className = 'timeline-stop-wrapper';
-    wrapper.dataset.index = idx;
+    wrapper.dataset.index = globalIdx; // Drag-drop references the global index
     
     // Add active class if this stop is the currently active one
     if (idx === State.activeStopIndex && !State.isTransit) {
@@ -312,16 +408,16 @@ function renderTimeline() {
           <div class="stop-time-settings">
             <div class="time-input-wrap">
               <span>Start</span>
-              <input type="text" class="input-time-schedule" data-idx="${idx}" value="${stop.time}" ${idx > 0 ? 'disabled' : ''} placeholder="e.g. 10:00 AM">
+              <input type="text" class="input-time-schedule" data-idx="${globalIdx}" value="${stop.time}" ${idx > 0 ? 'disabled' : ''} placeholder="e.g. 10:00 AM">
             </div>
             <div class="time-input-wrap">
               <span>Duration</span>
-              <input type="number" class="input-duration" data-idx="${idx}" min="5" max="480" value="${stop.duration}">
+              <input type="number" class="input-duration" data-idx="${globalIdx}" min="5" max="480" value="${stop.duration}">
               <span>min</span>
             </div>
           </div>
         </div>
-        <button class="btn-delete-stop" data-idx="${idx}" title="Remove stop">✕</button>
+        <button class="btn-delete-stop" data-idx="${globalIdx}" title="Remove stop">✕</button>
       </div>
     `;
 
@@ -335,16 +431,22 @@ function renderTimeline() {
     container.appendChild(wrapper);
 
     // If not the last stop, append transit info card
-    if (idx < State.destinations.length - 1) {
-      const nextStop = State.destinations[idx + 1];
-      const dist = haversineKm(stop.lat, stop.lng, nextStop.lat, nextStop.lng);
-      const transit = estimateTransit(dist);
+    if (idx < activeDests.length - 1) {
+      const nextStop = activeDests[idx + 1];
+      
+      // Load OSRM-based road transit values if loaded, else estimate
+      const dist = stop.roadTransitDistance !== undefined ? stop.roadTransitDistance : haversineKm(stop.lat, stop.lng, nextStop.lat, nextStop.lng);
+      const isWalking = dist < 1.2;
+      const transitMins = stop.roadTransitDuration !== undefined ? Math.round(stop.roadTransitDuration) : (isWalking ? Math.round((dist / 5) * 60) : Math.round((dist / 30) * 60));
+      
+      const modeText = isWalking ? 'Walk 🚶' : 'Drive 🚗';
+      const durationText = `~${transitMins} min ${isWalking ? 'walk' : 'drive'}`;
 
       const transitNode = document.createElement('div');
       transitNode.className = 'timeline-transit-node';
       transitNode.innerHTML = `
-        <span class="transit-icon">${transit.mode.split(' ')[0]}</span>
-        <span class="transit-details">${transit.mode.split(' ')[1]} ${formatDistance(dist)} (${transit.desc})</span>
+        <span class="transit-icon">${modeText.split(' ')[0]}</span>
+        <span class="transit-details">${modeText.split(' ')[1]} ${formatDistance(dist)} (${durationText})</span>
       `;
       container.appendChild(transitNode);
     }
@@ -421,7 +523,7 @@ function bindDragAndDrop(container) {
       const targetIndex = parseInt(wrapper.dataset.index);
       
       if (dragSourceIndex !== null && dragSourceIndex !== targetIndex) {
-        // Swap or move elements
+        // Swap or move elements in the main destinations array
         const movedItem = State.destinations.splice(dragSourceIndex, 1)[0];
         State.destinations.splice(targetIndex, 0, movedItem);
         saveItineraryState();
@@ -436,6 +538,8 @@ function addPlaceToItinerary(poolIdx) {
   const place = State.importedPlaces[poolIdx];
   if (!place) return;
 
+  const activeDests = State.destinations.filter(d => d.day_index === State.activeDayIndex);
+
   // Generate a unique ID
   const newStop = {
     id: 'dest_' + Math.random().toString(36).substr(2, 9),
@@ -444,17 +548,18 @@ function addPlaceToItinerary(poolIdx) {
     lng: place.lng,
     maps_url: place.maps_url || '',
     category: place.category || 'Attraction',
-    time: State.destinations.length === 0 ? '09:00 AM' : '', // Seq auto calculated
-    duration: 90
+    time: activeDests.length === 0 ? '09:00 AM' : '', // Sequences auto calculated
+    duration: 90,
+    day_index: State.activeDayIndex // Set stop day to currently active day
   };
 
   State.destinations.push(newStop);
   saveItineraryState();
-  showToast(`📍 Added "${place.name}" to itinerary!`, 'success');
+  showToast(`📍 Added "${place.name}" to Day ${State.activeDayIndex + 1}!`, 'success');
 }
 
-function removePlaceFromItinerary(idx) {
-  const removed = State.destinations.splice(idx, 1)[0];
+function removePlaceFromItinerary(globalIdx) {
+  const removed = State.destinations.splice(globalIdx, 1)[0];
   saveItineraryState();
   if (removed) {
     showToast(`✕ Removed "${removed.name}" from itinerary.`, 'info');
@@ -470,10 +575,11 @@ function deleteFromPool(idx) {
   }
 }
 
-// ── Leaflet Map Controls ──────────────────────────────────
-function initLeafletMap() {
-  const center = State.destinations.length > 0 
-    ? [State.destinations[0].lat, State.destinations[0].lng] 
+// ── Leaflet Map Controls (Google roadmap tiles) ───────────
+function initGoogleLeafletMap() {
+  const activeDests = State.destinations.filter(d => d.day_index === State.activeDayIndex);
+  const center = activeDests.length > 0 
+    ? [activeDests[0].lat, activeDests[0].lng] 
     : [15.5523, 73.7771]; // Default to Goa
 
   State.map = L.map('map-container', {
@@ -481,10 +587,9 @@ function initLeafletMap() {
     scrollWheelZoom: true
   }).setView(center, 12);
 
-  // CartoDB Voyager tiles - very playful, clean, matching a colorful design system!
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-    attribution: '&copy; OpenStreetMap &copy; CartoDB',
-    subdomains: 'abcd',
+  // standard Google Maps roadmap tiles layer
+  L.tileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
+    attribution: '&copy; Google Maps',
     maxZoom: 20
   }).addTo(State.map);
 
@@ -497,7 +602,11 @@ function initLeafletMap() {
   drawRouteOnMap();
 }
 
-function drawRouteOnMap() {
+/**
+ * Plots day-specific markers, connects them by requesting exact roadway coordinates from OSRM,
+ * and caches computed durations.
+ */
+async function drawRouteOnMap() {
   if (!State.map || !State.markersLayer) return;
 
   State.markersLayer.clearLayers();
@@ -506,10 +615,11 @@ function drawRouteOnMap() {
     State.routeLine = null;
   }
 
-  if (State.destinations.length === 0) return;
+  const activeDests = State.destinations.filter(d => d.day_index === State.activeDayIndex);
+  if (activeDests.length === 0) return;
 
   const latlngs = [];
-  State.destinations.forEach((stop, idx) => {
+  activeDests.forEach((stop, idx) => {
     const coords = [stop.lat, stop.lng];
     latlngs.push(coords);
 
@@ -531,12 +641,11 @@ function drawRouteOnMap() {
 
     const marker = L.marker(coords, { icon: customIcon });
     
-    // Custom popup content
     const emoji = CategoryEmojis[stop.category] || '📍';
     const popupContent = `
       <div class="map-popup-card">
         <h4>${emoji} ${stop.name}</h4>
-        <p>Category: <b>${stop.category}</b></p>
+        <p>Day: <b>${State.activeDayIndex + 1}</b></p>
         <p>Arrival: <b>${stop.time}</b> (${stop.duration} mins)</p>
         ${stop.maps_url ? `<p style="margin-top:5px;"><a href="${stop.maps_url}" target="_blank" style="color:var(--primary); text-decoration:none; font-weight:600;">View on Google Maps ↗</a></p>` : ''}
       </div>
@@ -546,28 +655,69 @@ function drawRouteOnMap() {
     State.markersLayer.addLayer(marker);
   });
 
-  // Connecting route line
+  // Calculate actual ROADWAYS shortest routes using OSRM API
   if (latlngs.length > 1) {
-    State.routeLine = L.polyline(latlngs, {
-      color: '#FF6B4A',
-      weight: 4,
-      opacity: 0.8,
-      dashArray: '8, 8',
-      lineJoin: 'round'
-    }).addTo(State.map);
+    const coordsQuery = latlngs.map(c => `${c[1]},${c[0]}`).join(';');
+    const osrmUrl = `https://router.project-osrm.org/route/v1/driving/${coordsQuery}?overview=full&geometries=geojson`;
 
-    // Zoom map to show entire path bounds
     try {
+      const res = await fetch(osrmUrl);
+      if (!res.ok) throw new Error('OSRM routing request failed');
+      const data = await res.json();
+
+      if (data.routes && data.routes.length > 0) {
+        const route = data.routes[0];
+        
+        // Draw the exact roadway geometry on the map
+        State.routeLine = L.geoJSON(route.geometry, {
+          color: '#FF6B4A',
+          weight: 5,
+          opacity: 0.85
+        }).addTo(State.map);
+
+        // Update timeline transit times using the actual road distance/durations
+        let timingsChanged = false;
+        if (route.legs && route.legs.length === activeDests.length - 1) {
+          route.legs.forEach((leg, i) => {
+            const stop = activeDests[i];
+            const roadDist = leg.distance / 1000;      // km
+            const roadMins = leg.duration / 60;        // minutes
+
+            if (stop.roadTransitDistance !== roadDist || stop.roadTransitDuration !== roadMins) {
+              stop.roadTransitDistance = roadDist;
+              stop.roadTransitDuration = roadMins;
+              timingsChanged = true;
+            }
+          });
+        }
+
+        if (timingsChanged) {
+          // Re-sequence arrival times sequentially and save
+          recalculateScheduleTimings();
+          renderTimeline();
+        }
+
+        // Fit boundaries to show full road layout
+        State.map.fitBounds(State.routeLine.getBounds(), { padding: [50, 50] });
+      }
+    } catch (err) {
+      console.warn('[OSRM Routing] Falling back to straight-line route representation:', err);
+      // Fallback: draw straight dashed line connecting stops
+      State.routeLine = L.polyline(latlngs, {
+        color: '#FF6B4A',
+        weight: 4,
+        opacity: 0.8,
+        dashArray: '8, 8'
+      }).addTo(State.map);
+      
       State.map.fitBounds(State.routeLine.getBounds(), { padding: [50, 50] });
-    } catch (e) {
-      console.warn('Map fit bounds issue:', e);
     }
   } else if (latlngs.length === 1) {
     State.map.setView(latlngs[0], 14);
   }
 }
 
-// ── Google Maps Shared List / Place URL Scraper ───────────
+// ── Google Maps / OSM Nominatim Place Importer ────────────
 async function importFromInput() {
   const importInput = document.getElementById('import-input');
   const inputStr = importInput.value.trim();
@@ -585,7 +735,6 @@ async function importFromInput() {
   progress.style.display = 'flex';
   progressText.textContent = 'Analyzing input...';
 
-  // Process input line-by-line
   const lines = inputStr.split('\n').map(l => l.trim()).filter(l => l.length > 0);
   let successCount = 0;
   let failCount = 0;
@@ -593,7 +742,6 @@ async function importFromInput() {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     
-    // Check if it's a URL
     if (line.startsWith('http://') || line.startsWith('https://')) {
       progressText.textContent = `Scraping URL (${i + 1}/${lines.length})...`;
       try {
@@ -609,7 +757,6 @@ async function importFromInput() {
           });
           successCount++;
         } else {
-          // If URL scrape fails to find coords, fall back to searching the name via geocoding
           if (place && place.name && !place.lat) {
             const geocoded = await geocodeTextName(place.name);
             if (geocoded) {
@@ -628,8 +775,7 @@ async function importFromInput() {
           failCount++;
         }
       } catch (e) {
-        console.warn('URL scraping failed, trying text-search fallback...', e);
-        // Extract possible query names from typical Google Maps URLs
+        console.warn('URL scraping failed, trying text fallback...', e);
         const queryName = extractNameFromMapsUrl(line);
         if (queryName) {
           const geocoded = await geocodeTextName(queryName);
@@ -649,7 +795,6 @@ async function importFromInput() {
         failCount++;
       }
     } else {
-      // It's a text search
       progressText.textContent = `Searching "${line}" (${i + 1}/${lines.length})...`;
       try {
         const geocoded = await geocodeTextName(line);
@@ -669,12 +814,10 @@ async function importFromInput() {
       } catch (e) {
         failCount++;
       }
-      // Delay to respect OSM Nominatim rate limit (1 request/second)
       await new Promise(r => setTimeout(r, 1000));
     }
   }
 
-  // Save imported places pool to localstorage
   localStorage.setItem('tq_imported_places', JSON.stringify(State.importedPlaces));
   renderSavedPlacesPool();
   importInput.value = '';
@@ -693,18 +836,14 @@ async function importFromInput() {
 function extractNameFromMapsUrl(url) {
   try {
     const decoded = decodeURIComponent(url);
-    // Matches patterns like .../place/Place+Name/...
     const placeMatch = decoded.match(/maps\/place\/([^/@]+)/);
     if (placeMatch) return placeMatch[1].replace(/\+/g, ' ');
-
-    // Matches search query parameters
     const queryMatch = decoded.match(/query=([^&]+)/) || decoded.match(/q=([^&]+)/);
     if (queryMatch) return queryMatch[1].replace(/\+/g, ' ');
   } catch (e) {}
   return null;
 }
 
-/** Parses Google Maps URL using CORS Proxy */
 async function scrapeGoogleMapsUrl(url) {
   const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
   const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(10000) });
@@ -714,7 +853,6 @@ async function scrapeGoogleMapsUrl(url) {
   const html = json.contents || '';
   const finalUrl = json.status?.url || url;
 
-  // Extract name from HTML title
   let name = '';
   const titleMatch = html.match(/<title[^>]*>([^<|·]+)/i);
   if (titleMatch) {
@@ -725,15 +863,12 @@ async function scrapeGoogleMapsUrl(url) {
     if (extracted) name = extracted;
   }
 
-  // Extract coordinates
   let lat = null, lng = null;
-  // Look for patterns like @15.5523,73.7771
   const coordsMatch = (finalUrl + html).match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
   if (coordsMatch) {
     lat = parseFloat(coordsMatch[1]);
     lng = parseFloat(coordsMatch[2]);
   } else {
-    // Alternate format: [null,null,lat,lng] inside JS
     const altCoordsMatch = html.match(/\[null,null,(-?\d+\.\d+),(-?\d+\.\d+)\]/);
     if (altCoordsMatch) {
       lat = parseFloat(altCoordsMatch[1]);
@@ -744,7 +879,6 @@ async function scrapeGoogleMapsUrl(url) {
   return { name: name || 'Google Maps Place', lat, lng };
 }
 
-/** Geocodes place name using OpenStreetMap Nominatim API */
 async function geocodeTextName(name) {
   const cleanQuery = name.trim();
   const searchUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(cleanQuery)}&limit=1`;
@@ -752,7 +886,6 @@ async function geocodeTextName(name) {
   const res = await fetch(searchUrl, {
     headers: {
       'Accept-Language': 'en',
-      // Nominatim requires a user-agent to prevent blocking
       'User-Agent': 'TripQuest Itinerary Planner'
     }
   });
@@ -770,31 +903,56 @@ async function geocodeTextName(name) {
   return null;
 }
 
-// ── Real-Time Tracking Core ──────────────────────────────
-function startClock() {
-  // Run every second
-  setInterval(() => {
-    let activeMinutes;
+// ── Web Audio Synth Beep Alarm ────────────────────────────
+function playAlarmChime() {
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    const ctx = new AudioContext();
     
-    if (State.isSimulating) {
-      activeMinutes = State.simulatedMinutes;
-    } else {
-      activeMinutes = getCurrentMinutesFromMidnight();
-    }
+    // Pulse A5 and C#6 note sequence
+    const notes = [880, 1109]; 
+    notes.forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, ctx.currentTime + idx * 0.25);
+      
+      gain.gain.setValueAtTime(0, ctx.currentTime + idx * 0.25);
+      gain.gain.linearRampToValueAtTime(0.15, ctx.currentTime + idx * 0.25 + 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + idx * 0.25 + 0.4);
+      
+      osc.start(ctx.currentTime + idx * 0.25);
+      osc.stop(ctx.currentTime + idx * 0.25 + 0.45);
+    });
+  } catch (e) {
+    console.warn('Audio synthesis failed:', e);
+  }
+}
 
-    // Update digital clock display
+// ── Real-Time Tracking Core & 10-Minute Warnings ──────────
+function startClock() {
+  setInterval(() => {
+    const activeMinutes = getCurrentMinutesFromMidnight();
+
+    // Update clock
     const clockEl = document.getElementById('clock-display');
-    if (clockEl) {
-      clockEl.textContent = formatMinutes(activeMinutes);
-    }
+    if (clockEl) clockEl.textContent = formatMinutes(activeMinutes);
 
-    // Determine current stop status
+    // Evaluate stop statuses
     evaluateCurrentStopStatus(activeMinutes);
+    
+    // Check 10-minute warning schedules
+    checkDepartureAlertSchedules(activeMinutes);
   }, 1000);
 }
 
 function evaluateCurrentStopStatus(activeTime) {
-  if (State.destinations.length === 0) {
+  const activeDests = State.destinations.filter(d => d.day_index === State.activeDayIndex);
+  if (activeDests.length === 0) {
     updateActiveStopUI(null, false);
     return;
   }
@@ -804,31 +962,28 @@ function evaluateCurrentStopStatus(activeTime) {
   let transitFrom = null;
   let transitTo = null;
 
-  const firstStopStart = parseTimeToMinutes(State.destinations[0].time);
+  const firstStopStart = parseTimeToMinutes(activeDests[0].time);
   
   if (activeTime < firstStopStart) {
-    // Before trip starts
     updateActiveStopUI({
       type: 'upcoming',
-      nextStop: State.destinations[0]
+      nextStop: activeDests[0]
     });
     return;
   }
 
-  for (let i = 0; i < State.destinations.length; i++) {
-    const stop = State.destinations[i];
+  for (let i = 0; i < activeDests.length; i++) {
+    const stop = activeDests[i];
     const start = parseTimeToMinutes(stop.time);
     const end = start + (parseInt(stop.duration) || 60);
 
-    // Check if active time matches this stop duration
     if (activeTime >= start && activeTime <= end) {
       matchedIdx = i;
       break;
     }
 
-    // Check if active time falls between this stop and the next
-    if (i < State.destinations.length - 1) {
-      const nextStop = State.destinations[i + 1];
+    if (i < activeDests.length - 1) {
+      const nextStop = activeDests[i + 1];
       const nextStart = parseTimeToMinutes(nextStop.time);
       
       if (activeTime > end && activeTime < nextStart) {
@@ -841,8 +996,7 @@ function evaluateCurrentStopStatus(activeTime) {
   }
 
   if (matchedIdx !== null) {
-    // Stop is active
-    const activeStop = State.destinations[matchedIdx];
+    const activeStop = activeDests[matchedIdx];
     const endMins = parseTimeToMinutes(activeStop.time) + (parseInt(activeStop.duration) || 60);
     const remaining = endMins - activeTime;
 
@@ -853,28 +1007,83 @@ function evaluateCurrentStopStatus(activeTime) {
       remainingText: `ends in ${remaining} mins`
     });
   } else if (isTransit) {
-    // Currently traveling
     const nextStart = parseTimeToMinutes(transitTo.time);
     const remaining = nextStart - activeTime;
-    const dist = haversineKm(transitFrom.lat, transitFrom.lng, transitTo.lat, transitTo.lng);
-    const transit = estimateTransit(dist);
+    const dist = transitFrom.roadTransitDistance !== undefined ? transitFrom.roadTransitDistance : haversineKm(transitFrom.lat, transitFrom.lng, transitTo.lat, transitTo.lng);
+    const travelTime = transitFrom.roadTransitDuration !== undefined ? Math.round(transitFrom.roadTransitDuration) : (dist < 1.2 ? Math.round((dist / 5) * 60) : Math.round((dist / 30) * 60));
 
     updateActiveStopUI({
       type: 'transit',
       from: transitFrom,
       to: transitTo,
-      remainingText: `Arriving in ~${remaining} min (${formatDistance(dist)} ${transit.mode.split(' ')[0]})`
+      remainingText: `Arriving in ~${remaining} min (${formatDistance(dist)} via roadways)`
     });
   } else {
-    // Past last stop
     updateActiveStopUI({
       type: 'completed'
     });
   }
 }
 
-let lastActiveIndex = null;
-let lastIsTransit = null;
+/** 
+ * Scans active day timeline and fires warning alerts 10 minutes before travel starts 
+ */
+function checkDepartureAlertSchedules(activeTime) {
+  const activeDests = State.destinations.filter(d => d.day_index === State.activeDayIndex);
+  if (activeDests.length < 2) return;
+
+  // Check if alarm currently snoozed
+  if (State.alarmSnoozedUntil && Date.now() < State.alarmSnoozedUntil) return;
+
+  for (let i = 1; i < activeDests.length; i++) {
+    const nextStop = activeDests[i];
+    const prevStop = activeDests[i - 1];
+
+    // Read distance and travel duration between stops
+    const dist = prevStop.roadTransitDistance !== undefined ? prevStop.roadTransitDistance : haversineKm(prevStop.lat, prevStop.lng, nextStop.lat, nextStop.lng);
+    const transitDuration = prevStop.roadTransitDuration !== undefined ? Math.round(prevStop.roadTransitDuration) : (dist < 1.2 ? Math.round((dist / 5) * 60) : Math.round((dist / 30) * 60));
+
+    const nextStartMin = parseTimeToMinutes(nextStop.time);
+    const requiredDepartureTime = nextStartMin - transitDuration;
+    
+    // We alarm 10 minutes before the departure time
+    const alarmTime = requiredDepartureTime - 10;
+
+    // Trigger condition
+    if (activeTime >= alarmTime && activeTime < requiredDepartureTime) {
+      // Prevent double alarm triggers for the same next stop
+      if (State.alarmDismissedStopId === nextStop.id || State.lastNotifiedStopId === nextStop.id) {
+        continue;
+      }
+
+      triggerDepartureAlarm(nextStop, dist, transitDuration);
+      break;
+    }
+  }
+}
+
+function triggerDepartureAlarm(nextStop, distance, durationMins) {
+  State.lastNotifiedStopId = nextStop.id;
+
+  // 1. Play synthesize chime
+  playAlarmChime();
+
+  // 2. Display Overlay Alert
+  const msgEl = document.getElementById('alarm-message');
+  msgEl.innerHTML = `
+    You need to leave for <b>${nextStop.name}</b> in 10 minutes!
+    <br>Distance: <b>${formatDistance(distance)}</b> | Drive time: <b>${durationMins} mins</b>.
+  `;
+  document.getElementById('alarm-overlay').classList.add('active');
+
+  // 3. Push native OS warning
+  if ('Notification' in window && Notification.permission === 'granted') {
+    new Notification('TripQuest Departure Warning', {
+      body: `Leave for ${nextStop.name} in 10 mins! (Distance: ${formatDistance(distance)}, travel: ${durationMins} mins)`,
+      icon: './icon.svg'
+    });
+  }
+}
 
 function updateActiveStopUI(status, forceMapDraw = true) {
   const card = document.getElementById('active-stop-card');
@@ -905,7 +1114,8 @@ function updateActiveStopUI(status, forceMapDraw = true) {
   else if (status.type === 'active') {
     card.querySelector('.status-label').textContent = '🟢 CURRENT STOP';
     placeTitle.textContent = status.stop.name;
-    timeDesc.textContent = `${status.stop.time} - ${formatMinutes(parseTimeToMinutes(status.stop.time) + parseInt(status.stop.duration))} (${status.remainingText})`;
+    const stopDuration = parseInt(status.stop.duration) || 60;
+    timeDesc.textContent = `${status.stop.time} - ${formatMinutes(parseTimeToMinutes(status.stop.time) + stopDuration)} (${status.remainingText})`;
     
     if (State.activeStopIndex !== status.index || State.isTransit !== false) {
       State.activeStopIndex = status.index;
@@ -936,19 +1146,14 @@ function updateActiveStopUI(status, forceMapDraw = true) {
     }
   }
 
-  // Highlight timeline active nodes & marker animations if state transitions
   if (changed || forceMapDraw) {
-    // 1. Re-render timeline to highlight active card
     renderTimeline();
-
-    // 2. Redraw map to update pulsing active marker
     drawRouteOnMap();
 
-    // 3. Center map on active location
+    // Map auto pans to current stop or bounds
     if (status.type === 'active' && State.map) {
       State.map.setView([status.stop.lat, status.stop.lng], 14);
     } else if (status.type === 'transit' && State.map) {
-      // Zoom map to show the bounds between the transit points
       const bounds = L.latLngBounds(
         [status.from.lat, status.from.lng],
         [status.to.lat, status.to.lng]
@@ -960,13 +1165,44 @@ function updateActiveStopUI(status, forceMapDraw = true) {
 
 // ── Event Bindings ────────────────────────────────────────
 function bindEvents() {
-  // Import click
   document.getElementById('btn-import').addEventListener('click', importFromInput);
-
-  // Save Trip Details
   document.getElementById('trip-name').addEventListener('change', saveTripDetails);
 
-  // Modal Setup
+  // Saved List selector change
+  document.getElementById('gmaps-list-select').addEventListener('change', (e) => {
+    const listKey = e.target.value;
+    State.importedPlaces = [...SimulatedSavedLists[listKey]];
+    renderSavedPlacesPool();
+    showToast(`Loaded list "${e.target.options[e.target.selectedIndex].text}"!`, 'info');
+  });
+
+  // Add new day
+  document.getElementById('btn-add-day').addEventListener('click', () => {
+    const newDayNum = State.days.length + 1;
+    State.days.push(`Day ${newDayNum}`);
+    
+    localStorage.setItem('tq_itinerary_days', JSON.stringify(State.days));
+    State.activeDayIndex = newDayNum - 1;
+    
+    saveItineraryState();
+    renderDayTabs();
+    showToast(`Added Day ${newDayNum}!`, 'success');
+  });
+
+  // Alarm modal buttons
+  document.getElementById('btn-alarm-snooze').addEventListener('click', () => {
+    State.alarmSnoozedUntil = Date.now() + 5 * 60 * 1000; // Snooze 5 minutes
+    document.getElementById('alarm-overlay').classList.remove('active');
+    showToast('Alert snoozed for 5 minutes.', 'info');
+  });
+
+  document.getElementById('btn-alarm-dismiss').addEventListener('click', () => {
+    State.alarmDismissedStopId = State.lastNotifiedStopId;
+    document.getElementById('alarm-overlay').classList.remove('active');
+    showToast('Alert dismissed.', 'info');
+  });
+
+  // Database Connection setup modal
   const setupBtn = document.getElementById('btn-open-sb-setup');
   const modal = document.getElementById('modal-supabase');
   const cancelBtn = document.getElementById('btn-sb-cancel');
@@ -974,7 +1210,6 @@ function bindEvents() {
 
   setupBtn.addEventListener('click', () => {
     modal.classList.add('active');
-    // Pre-fill
     const creds = getCredentials();
     document.getElementById('sb-url').value = creds.url;
     document.getElementById('sb-key').value = creds.key;
@@ -991,9 +1226,8 @@ function bindEvents() {
     const key = document.getElementById('sb-key').value.trim();
     
     if (!url || !key) {
-      // Clear credentials (disconnect)
       saveCredentials('', '');
-      showToast('Database Sync disconnected (running offline)', 'info');
+      showToast('Database Sync disconnected', 'info');
       modal.classList.remove('active');
       await loadState();
       renderAll();
@@ -1010,7 +1244,6 @@ function bindEvents() {
       showToast('Supabase successfully synced!', 'success');
       modal.classList.remove('active');
       
-      // Reload everything to pull from DB
       await loadState();
       renderAll();
       drawRouteOnMap();
@@ -1018,41 +1251,6 @@ function bindEvents() {
       statusEl.textContent = `Error: ${res.message}`;
       statusEl.style.color = 'var(--danger)';
     }
-  });
-
-  // Time simulation controls
-  const toggle = document.getElementById('sim-time-toggle');
-  const sliderRow = document.getElementById('sim-slider-row');
-  const slider = document.getElementById('sim-time-slider');
-  const sliderLabel = document.getElementById('sim-time-label');
-  const modeBadge = document.getElementById('tracker-mode-badge');
-
-  toggle.addEventListener('change', (e) => {
-    State.isSimulating = e.target.checked;
-    if (State.isSimulating) {
-      sliderRow.style.display = 'block';
-      modeBadge.textContent = 'Simulated';
-      modeBadge.classList.add('simulated');
-      
-      // Set slider to current actual time first
-      const currentMin = getCurrentMinutesFromMidnight();
-      slider.value = currentMin;
-      State.simulatedMinutes = currentMin;
-      sliderLabel.textContent = formatMinutes(currentMin);
-    } else {
-      sliderRow.style.display = 'none';
-      modeBadge.textContent = 'Real-Time';
-      modeBadge.classList.remove('simulated');
-    }
-    // Instantly refresh UI
-    evaluateCurrentStopStatus(State.isSimulating ? State.simulatedMinutes : getCurrentMinutesFromMidnight());
-  });
-
-  slider.addEventListener('input', (e) => {
-    const val = parseInt(e.target.value);
-    State.simulatedMinutes = val;
-    sliderLabel.textContent = formatMinutes(val);
-    evaluateCurrentStopStatus(val);
   });
 }
 

@@ -146,8 +146,14 @@ export async function loadDestinations(tripId) {
 
     if (error) throw error;
     if (data) {
-      localStorage.setItem(`tq_destinations_${tripId}`, JSON.stringify(data));
-      return data;
+      // Decode day_index from sort_order
+      const decodedDests = data.map(d => ({
+        ...d,
+        day_index: Math.floor(d.sort_order / 1000),
+        sort_order: d.sort_order % 1000
+      }));
+      localStorage.setItem(`tq_destinations_${tripId}`, JSON.stringify(decodedDests));
+      return decodedDests;
     }
   } catch (err) {
     console.warn('[Supabase] loadDestinations failed, using local fallback:', err);
@@ -157,7 +163,7 @@ export async function loadDestinations(tripId) {
 
 /** Overwrite and save destinations for a trip */
 export async function saveDestinations(tripId, destsArray) {
-  // Format for DB mapping
+  // Format for DB mapping (omitting day_index to prevent Supabase column error, encoding it in sort_order)
   const formattedDests = destsArray.map((d, index) => ({
     id: d.id.startsWith('tmp_') ? undefined : d.id, // let Supabase generate UUID if temp
     trip_id: tripId,
@@ -170,14 +176,14 @@ export async function saveDestinations(tripId, destsArray) {
     category: d.category || 'Attraction',
     time: d.time || '',
     duration: parseInt(d.duration) || 60,
-    sort_order: index
+    sort_order: (d.day_index || 0) * 1000 + index
   }));
 
-  // Save locally
-  localStorage.setItem(`tq_destinations_${tripId}`, JSON.stringify(formattedDests));
+  // Save full JS objects locally
+  localStorage.setItem(`tq_destinations_${tripId}`, JSON.stringify(destsArray));
 
   const client = getClient();
-  if (!client) return formattedDests;
+  if (!client) return destsArray;
 
   try {
     // 1. Delete existing destinations
@@ -197,12 +203,18 @@ export async function saveDestinations(tripId, destsArray) {
 
       if (insError) throw insError;
       if (data) {
-        localStorage.setItem(`tq_destinations_${tripId}`, JSON.stringify(data));
-        return data;
+        // Decode day_index to save back locally
+        const decodedDests = data.map(d => ({
+          ...d,
+          day_index: Math.floor(d.sort_order / 1000),
+          sort_order: d.sort_order % 1000
+        }));
+        localStorage.setItem(`tq_destinations_${tripId}`, JSON.stringify(decodedDests));
+        return decodedDests;
       }
     }
   } catch (err) {
     console.error('[Supabase] saveDestinations failed:', err);
   }
-  return formattedDests;
+  return destsArray;
 }

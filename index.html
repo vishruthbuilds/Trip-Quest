@@ -44,7 +44,16 @@
 
       <div class="sidebar-scrollable">
 
-        <!-- Section: Real-Time Tracker / Simulator -->
+        <!-- Linked Google Account Info -->
+        <div class="user-account-badge">
+          <div class="account-avatar">V</div>
+          <div class="account-info">
+            <span class="account-email">vishruth2026@gmail.com</span>
+            <span class="account-label">Google Account Connected</span>
+          </div>
+        </div>
+
+        <!-- Section: Real-Time Tracker -->
         <section class="sidebar-section active-status-section">
           <div class="section-header">
             <span class="icon">⏰</span>
@@ -53,7 +62,7 @@
           <div class="card status-card">
             <div class="time-header-row">
               <div class="clock-display" id="clock-display">00:00 AM</div>
-              <div class="tracker-mode-badge" id="tracker-mode-badge">Real-Time</div>
+              <div class="tracker-mode-badge" id="tracker-mode-badge">Active</div>
             </div>
             
             <!-- Dynamic active card -->
@@ -61,17 +70,6 @@
               <p class="status-label">CURRENT STOP</p>
               <h3 class="status-place-name" id="active-place-name">No active stops</h3>
               <p class="status-time" id="active-place-time">—</p>
-            </div>
-
-            <div class="simulation-controls">
-              <label class="toggle-control">
-                <input type="checkbox" id="sim-time-toggle">
-                <span class="control-label">Simulate Time of Day</span>
-              </label>
-              <div class="slider-row" id="sim-slider-row" style="display:none;">
-                <input type="range" id="sim-time-slider" min="0" max="1439" value="720" class="time-slider">
-                <div class="slider-time-label" id="sim-time-label">12:00 PM</div>
-              </div>
             </div>
           </div>
         </section>
@@ -114,8 +112,19 @@
             <span class="icon">📥</span>
             <h2>Saved Places (<span id="saved-count">0</span>)</h2>
           </div>
+          
+          <!-- Google Maps Saved Lists Selector -->
+          <div class="card lists-select-card">
+            <label class="form-label" for="gmaps-list-select">Google Maps Saved Lists</label>
+            <select id="gmaps-list-select" class="form-input select-list-dropdown">
+              <option value="beaches_forts">⭐️ Goa Beaches & Forts</option>
+              <option value="cafes_restaurants">☕ Goa Cafes & Restaurants</option>
+              <option value="south_goa">🏛️ South Goa Cultural Sites</option>
+            </select>
+          </div>
+
           <div class="saved-places-pool" id="saved-places-pool">
-            <div class="pool-empty-hint">Import Google Maps places to start building your itinerary.</div>
+            <div class="pool-empty-hint">Loading synced places from Google Maps...</div>
           </div>
         </section>
 
@@ -131,6 +140,14 @@
               <label class="form-label" for="trip-name">Trip Name</label>
               <input type="text" id="trip-name" class="form-input" placeholder="Goa Adventure 2026">
             </div>
+          </div>
+
+          <!-- Day Navigation selector -->
+          <div class="day-navigation">
+            <div id="day-tabs-container" class="day-tabs-container">
+              <!-- Rendered dynamically by JS -->
+            </div>
+            <button id="btn-add-day" class="btn btn-secondary btn-add-day" title="Add a new day">➕ Day</button>
           </div>
 
           <div class="timeline-container">
@@ -169,6 +186,24 @@
       <div class="modal-box-actions">
         <button id="btn-sb-cancel" class="btn btn-ghost">Cancel</button>
         <button id="btn-sb-connect" class="btn btn-primary">Connect 🔌</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Overlay: Departure Alarm -->
+  <div id="alarm-overlay" class="modal-overlay" aria-hidden="true">
+    <div class="modal-box alarm-box">
+      <div class="alarm-header-row">
+        <div class="alarm-icon">🚨</div>
+        <div class="alarm-title">Departure Alert!</div>
+      </div>
+      <p class="alarm-desc" id="alarm-message">
+        You need to leave for Baga Beach in 10 minutes!
+        <br>Distance: 4.8 km | Drive time: 12 mins.
+      </p>
+      <div class="modal-box-actions alarm-actions">
+        <button id="btn-alarm-snooze" class="btn btn-secondary">Snooze (5m)</button>
+        <button id="btn-alarm-dismiss" class="btn btn-primary alarm-dismiss-btn">Dismiss 📴</button>
       </div>
     </div>
   </div>
