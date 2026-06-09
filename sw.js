@@ -1,16 +1,10 @@
 // TripQuest PWA Service Worker
-const CACHE_NAME = 'tripquest-cache-v1';
+const CACHE_NAME = 'tripquest-cache-v2';
 const ASSETS = [
   './',
   './index.html',
   './style.css',
   './js/app.js',
-  './js/state.js',
-  './js/sync.js',
-  './js/itinerary.js',
-  './js/game.js',
-  './js/maps.js',
-  './js/mockData.js',
   './js/supabase.js',
   './icon.svg',
   './manifest.json'
@@ -39,14 +33,19 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-  // Pass-through for Supabase requests (real-time websockets/REST shouldn't be cached)
-  if (event.request.url.includes('supabase.co') || event.request.url.includes('basemaps.cartocdn.com')) {
+  // Pass-through for external maps & database APIs
+  if (
+    event.request.url.includes('supabase.co') || 
+    event.request.url.includes('basemaps.cartocdn.com') ||
+    event.request.url.includes('nominatim.openstreetmap.org') ||
+    event.request.url.includes('api.allorigins.win') ||
+    event.request.url.includes('unpkg.com')
+  ) {
     return;
   }
   
   event.respondWith(
     caches.match(event.request).then((cachedResponse) => {
-      // Return cache or fetch fresh
       return cachedResponse || fetch(event.request);
     })
   );

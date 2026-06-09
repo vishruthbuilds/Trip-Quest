@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>TripQuest — Travel Together</title>
-  <meta name="description" content="Plan trips, share moments, and explore destinations together with TripQuest.">
+  <title>TripQuest — Interactive Travel Itinerary</title>
+  <meta name="description" content="Design itineraries, import from Google Maps, and track your travel schedule in real-time.">
   <link rel="stylesheet" href="style.css">
   <link rel="manifest" href="manifest.json">
   <meta name="theme-color" content="#FF6B4A">
@@ -14,369 +14,164 @@
   <!-- Google Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+  <!-- Leaflet Map CSS & JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <!-- Supabase CDN -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 
-  <div class="device-wrapper">
-    <div class="device-screen">
+  <!-- Toast Notifications -->
+  <div id="toast-container" class="toast-container"></div>
 
-      <!-- ── Toast Notifications ── -->
-      <div id="toast-container" class="toast-container"></div>
-
-      <!-- ══════════════════════════════════════════════════
-           SCREEN 1 · AUTHENTICATION
-      ══════════════════════════════════════════════════ -->
-      <section id="screen-auth" class="screen active">
-        <div class="auth-bg">
-
-          <!-- Floating decorations -->
-          <div class="auth-deco" style="top:8%; left:10%;">✈️</div>
-          <div class="auth-deco" style="top:15%; right:12%; animation-delay:.6s;">🗺️</div>
-          <div class="auth-deco" style="top:25%; left:20%; animation-delay:1.2s; font-size:18px;">📍</div>
-          <div class="auth-deco" style="top:5%; right:25%; animation-delay:.3s; font-size:14px;">🌍</div>
-
-          <!-- Auth Card -->
-          <div class="auth-card">
-            <div class="auth-logo-block">
-              <div class="auth-logo-circle">🧭</div>
-              <h1 class="auth-app-name">TripQuest</h1>
-              <p class="auth-tagline">Plan together. Explore together.</p>
-            </div>
-
-            <!-- Google Sign In -->
-            <button id="btn-google-signin" class="btn-google">
-              <svg width="20" height="20" viewBox="0 0 24 24" style="flex-shrink:0;">
-                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
-                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-              </svg>
-              Continue with Google
-            </button>
-
-            <div class="auth-divider-row">
-              <span class="auth-divider-line"></span>
-              <span class="auth-divider-text">or use email</span>
-              <span class="auth-divider-line"></span>
-            </div>
-
-            <!-- Email / Password Fallback -->
-            <div class="email-auth-block">
-              <div class="email-auth-tabs">
-                <button id="tab-login" class="email-tab active" data-mode="login">Log In</button>
-                <button id="tab-signup" class="email-tab" data-mode="signup">Sign Up</button>
-              </div>
-              <input type="email" id="auth-email" class="form-input" placeholder="Email address">
-              <input type="password" id="auth-password" class="form-input" placeholder="Password" style="margin-top:8px;">
-              <div id="auth-name-row" class="auth-name-row" style="display:none; margin-top:8px;">
-                <input type="text" id="auth-name" class="form-input" placeholder="Your display name">
-              </div>
-              <button id="btn-email-auth" class="btn btn-primary" style="margin-top:10px;">Log In →</button>
-            </div>
-
-            <p class="auth-bottom-note">Your trip data syncs in real-time across all devices.</p>
-          </div>
-
-          <!-- Supabase config button -->
-          <button id="btn-open-sb-setup" class="sb-config-btn" title="Configure backend">⚡ Setup Backend</button>
+  <!-- Main Dashboard Grid -->
+  <div class="dashboard">
+    
+    <!-- Sidebar Controls -->
+    <aside class="sidebar">
+      
+      <!-- App Brand & Status -->
+      <header class="sidebar-header">
+        <div class="brand">
+          <span class="logo">🧭</span>
+          <h1>TripQuest</h1>
         </div>
-      </section>
+        <div class="header-actions">
+          <button id="btn-open-sb-setup" class="sb-config-btn" title="Setup Database Sync">⚡ Setup Sync</button>
+        </div>
+      </header>
 
-      <!-- ══════════════════════════════════════════════════
-           SCREEN 2 · FIRST-TIME PROFILE SETUP
-      ══════════════════════════════════════════════════ -->
-      <section id="screen-profile-setup" class="screen">
-        <div class="profile-setup-wrap">
-          <div class="profile-setup-top">
-            <span class="profile-setup-wave">👋</span>
-            <h2 class="profile-setup-heading">Welcome!</h2>
-            <p class="profile-setup-sub">Set up your traveller profile — this is how your friends will see you.</p>
+      <div class="sidebar-scrollable">
+
+        <!-- Section: Real-Time Tracker / Simulator -->
+        <section class="sidebar-section active-status-section">
+          <div class="section-header">
+            <span class="icon">⏰</span>
+            <h2>Real-Time Tracker</h2>
           </div>
-
-          <div class="card profile-setup-card">
-            <!-- Photo -->
-            <div class="setup-photo-row">
-              <div class="setup-photo-ring" id="setup-photo-preview">
-                <span class="setup-photo-letter" id="setup-photo-letter">?</span>
-                <img id="setup-photo-img" src="" alt="Profile" style="display:none; width:100%; height:100%; object-fit:cover; border-radius:50%;">
-              </div>
-              <div class="setup-photo-right">
-                <label for="setup-photo-file" class="btn btn-secondary" style="cursor:pointer; font-size:12px; padding:8px 14px; box-shadow:0 3px 0 #1D4ED8; display:inline-block; width:auto;">
-                  📸 Upload Photo
-                </label>
-                <input type="file" id="setup-photo-file" accept="image/*" style="display:none;">
-                <p style="font-size:10px; color:var(--text-muted); margin-top:5px;">JPG, PNG up to 5MB</p>
-                <button id="btn-remove-setup-photo" class="btn-link" style="display:none; font-size:11px; color:var(--text-muted); background:none; border:none; cursor:pointer; margin-top:2px;">✕ Remove</button>
-              </div>
+          <div class="card status-card">
+            <div class="time-header-row">
+              <div class="clock-display" id="clock-display">00:00 AM</div>
+              <div class="tracker-mode-badge" id="tracker-mode-badge">Real-Time</div>
+            </div>
+            
+            <!-- Dynamic active card -->
+            <div class="active-stop-card" id="active-stop-card">
+              <p class="status-label">CURRENT STOP</p>
+              <h3 class="status-place-name" id="active-place-name">No active stops</h3>
+              <p class="status-time" id="active-place-time">—</p>
             </div>
 
-            <!-- Name -->
+            <div class="simulation-controls">
+              <label class="toggle-control">
+                <input type="checkbox" id="sim-time-toggle">
+                <span class="control-label">Simulate Time of Day</span>
+              </label>
+              <div class="slider-row" id="sim-slider-row" style="display:none;">
+                <input type="range" id="sim-time-slider" min="0" max="1439" value="720" class="time-slider">
+                <div class="slider-time-label" id="sim-time-label">12:00 PM</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Section: Google Maps Import -->
+        <section class="sidebar-section">
+          <div class="section-header">
+            <span class="icon">📍</span>
+            <h2>Import Places</h2>
+          </div>
+          <div class="card import-card">
+            <p class="card-hint">Paste Google Maps lists, place links, or type names (one per line):</p>
+            <textarea id="import-input" class="form-input text-import-area" rows="3" placeholder="https://maps.app.goo.gl/...&#10;Baga Beach&#10;Calangute Beach"></textarea>
+            
+            <div class="import-controls-row">
+              <div class="category-select-wrapper">
+                <select id="import-category" class="form-input select-category">
+                  <option value="Attraction">🎯 Attraction</option>
+                  <option value="Cafe">☕ Cafe</option>
+                  <option value="Restaurant">🍜 Restaurant</option>
+                  <option value="Hotel">🏨 Hotel</option>
+                  <option value="Activity">🏄 Activity</option>
+                  <option value="Custom">📍 Custom</option>
+                </select>
+              </div>
+              <button id="btn-import" class="btn btn-primary btn-import">Import ⚡</button>
+            </div>
+
+            <!-- Import spinner -->
+            <div id="import-progress" class="import-progress" style="display:none;">
+              <div class="import-spinner"></div>
+              <span id="import-progress-text">Importing places...</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Section: Imported Places Repository -->
+        <section class="sidebar-section">
+          <div class="section-header">
+            <span class="icon">📥</span>
+            <h2>Saved Places (<span id="saved-count">0</span>)</h2>
+          </div>
+          <div class="saved-places-pool" id="saved-places-pool">
+            <div class="pool-empty-hint">Import Google Maps places to start building your itinerary.</div>
+          </div>
+        </section>
+
+        <!-- Section: Itinerary Timeline -->
+        <section class="sidebar-section">
+          <div class="section-header">
+            <span class="icon">🗓️</span>
+            <h2>Itinerary Timeline</h2>
+          </div>
+          
+          <div class="trip-details-card card">
             <div class="form-group">
-              <label class="form-label" for="setup-display-name">Display Name</label>
-              <input type="text" id="setup-display-name" class="form-input" placeholder="e.g. Vishruth" maxlength="30">
-            </div>
-
-            <button id="btn-save-profile" class="btn btn-primary" style="margin-top:4px;">
-              Start Exploring 🚀
-            </button>
-          </div>
-        </div>
-      </section>
-
-      <!-- ══════════════════════════════════════════════════
-           SCREEN 3 · MAIN APPLICATION
-      ══════════════════════════════════════════════════ -->
-      <section id="screen-app" class="screen">
-
-        <!-- App Header -->
-        <header class="app-header">
-          <div class="app-header-left">
-            <span class="app-header-logo">🧭</span>
-            <span class="app-header-name">TripQuest</span>
-          </div>
-          <div class="app-header-right">
-            <button id="btn-open-admin" class="header-action-btn" title="Admin Panel" aria-label="Admin Panel">⚙️</button>
-            <div class="header-avatar" id="header-avatar-wrap">
-              <span id="header-avatar-letter">?</span>
-              <img id="header-avatar-img" src="" alt="You" style="display:none; width:100%; height:100%; object-fit:cover; border-radius:50%;">
-            </div>
-          </div>
-        </header>
-
-        <!-- Main Content (tab panes) -->
-        <main class="app-main" id="app-main">
-
-          <!-- ─── TAB: ITINERARY ─── -->
-          <div id="tab-itinerary" class="tab-pane active">
-
-            <!-- Trip Banner (shown when trip published) -->
-            <div id="trip-banner" class="trip-banner" style="display:none;">
-              <div class="trip-banner-text">
-                <div class="trip-banner-label">Active Trip</div>
-                <h2 id="trip-banner-name" class="trip-banner-title">Trip Name</h2>
-                <p id="trip-banner-desc" class="trip-banner-desc"></p>
-                <p id="trip-banner-date" class="trip-banner-date"></p>
-              </div>
-              <div class="trip-banner-icon">✈️</div>
-            </div>
-
-            <!-- Empty state -->
-            <div id="itinerary-empty" class="empty-state-card">
-              <span class="empty-icon">🗺️</span>
-              <h3 class="empty-title">No Trip Yet</h3>
-              <p class="empty-desc">The admin hasn't published a trip plan yet.<br>Check back soon!</p>
-            </div>
-
-            <!-- Itinerary list -->
-            <div id="itinerary-list" class="itinerary-list" style="display:none;">
-              <!-- Rendered by JS -->
-            </div>
-
-          </div>
-
-          <!-- ─── TAB: TASKS ─── -->
-          <div id="tab-tasks" class="tab-pane" style="display:none;">
-            <div class="tab-page-title">✅ Tasks</div>
-
-            <div class="empty-state-card tasks-card">
-              <span class="empty-icon">📋</span>
-              <h3 class="empty-title">Tasks Coming Soon</h3>
-              <p class="empty-desc">Group challenges, missions, and check-in tasks will live here.</p>
-
-              <div class="task-preview-list">
-                <div class="task-preview-item">
-                  <span class="task-preview-icon">📍</span>
-                  <span>Check in at the first destination</span>
-                </div>
-                <div class="task-preview-item">
-                  <span class="task-preview-icon">📸</span>
-                  <span>Take a group photo at the beach</span>
-                </div>
-                <div class="task-preview-item">
-                  <span class="task-preview-icon">🍜</span>
-                  <span>Try a local street food dish</span>
-                </div>
-                <div class="task-preview-item">
-                  <span class="task-preview-icon">🌅</span>
-                  <span>Watch the sunset together</span>
-                </div>
-              </div>
+              <label class="form-label" for="trip-name">Trip Name</label>
+              <input type="text" id="trip-name" class="form-input" placeholder="Goa Adventure 2026">
             </div>
           </div>
 
-          <!-- ─── TAB: CHAT ─── -->
-          <div id="tab-chat" class="tab-pane chat-pane" style="display:none;">
-            <div class="tab-page-title">💬 Live Chat</div>
-            <div id="chat-messages" class="chat-messages-area">
-              <div class="chat-empty-hint">Say hi to the group! 👋</div>
-            </div>
-            <div class="chat-input-row">
-              <input type="text" id="chat-input" class="chat-text-input" placeholder="Message the group..." maxlength="500">
-              <button id="btn-chat-send" class="chat-send-btn" aria-label="Send">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-                  <path d="M22 2L11 13" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-                  <path d="M22 2L15 22L11 13L2 9L22 2Z" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-              </button>
+          <div class="timeline-container">
+            <div id="timeline-list" class="timeline-list">
+              <div class="timeline-empty-hint">Add places from your Saved Places pool.</div>
             </div>
           </div>
+        </section>
 
-        </main>
-
-        <!-- Bottom Navigation -->
-        <nav class="bottom-nav" id="bottom-nav">
-          <button class="nav-btn active" data-tab="itinerary" id="nav-itinerary">
-            <span class="nav-btn-icon">🗺️</span>
-            <span class="nav-btn-label">Itinerary</span>
-          </button>
-          <button class="nav-btn" data-tab="tasks" id="nav-tasks">
-            <span class="nav-btn-icon">✅</span>
-            <span class="nav-btn-label">Tasks</span>
-          </button>
-          <button class="nav-btn" data-tab="chat" id="nav-chat">
-            <span class="nav-btn-icon">💬</span>
-            <span class="nav-btn-label">Chat</span>
-            <span class="nav-badge" id="chat-badge" style="display:none;">0</span>
-          </button>
-        </nav>
-
-      </section>
-
-      <!-- ══════════════════════════════════════════════════
-           SCREEN 4 · ADMIN PANEL
-      ══════════════════════════════════════════════════ -->
-      <section id="screen-admin" class="screen">
-
-        <header class="admin-header">
-          <button id="btn-admin-back" class="admin-back-btn">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="15 18 9 12 15 6"></polyline>
-            </svg>
-            Back
-          </button>
-          <h2 class="admin-header-title">Admin Panel</h2>
-          <button id="btn-publish-header" class="btn btn-primary admin-header-publish">Publish 🚀</button>
-        </header>
-
-        <div class="admin-body">
-
-          <!-- Section: Trip Info -->
-          <div class="admin-section-block">
-            <div class="admin-section-label">📋 Trip Details</div>
-            <div class="card admin-card">
-              <div class="form-group">
-                <label class="form-label" for="admin-trip-name">Trip Name *</label>
-                <input type="text" id="admin-trip-name" class="form-input" placeholder="e.g. Goa Adventure 2026">
-              </div>
-              <div class="form-group">
-                <label class="form-label" for="admin-trip-desc">Description</label>
-                <textarea id="admin-trip-desc" class="form-input" rows="2" placeholder="Tell the group about this trip..." style="resize:vertical; font-family:inherit; min-height:60px;"></textarea>
-              </div>
-              <div class="form-group" style="margin-bottom:0;">
-                <label class="form-label" for="admin-trip-date">Start Date</label>
-                <input type="date" id="admin-trip-date" class="form-input">
-              </div>
-            </div>
-          </div>
-
-          <!-- Section: Import Places -->
-          <div class="admin-section-block">
-            <div class="admin-section-label">📍 Add Destinations</div>
-            <div class="card admin-card">
-              <p class="admin-hint">Paste a Google Maps link to import a place automatically.</p>
-
-              <!-- URL Import -->
-              <div class="import-url-row">
-                <input type="text" id="admin-url-input" class="form-input" placeholder="https://maps.app.goo.gl/...">
-              </div>
-              <button id="btn-import-url" class="btn btn-secondary" style="margin-top:8px; box-shadow:0 3px 0 #1D4ED8; font-size:13px;">
-                Import from Google Maps ⚡
-              </button>
-
-              <!-- Import progress indicator -->
-              <div id="import-progress" class="import-progress" style="display:none;">
-                <div class="import-spinner"></div>
-                <span>Fetching place info...</span>
-              </div>
-
-              <!-- Divider -->
-              <div class="admin-divider">— or add manually —</div>
-
-              <!-- Manual Add -->
-              <div class="form-group">
-                <label class="form-label" for="admin-manual-name">Place Name *</label>
-                <input type="text" id="admin-manual-name" class="form-input" placeholder="e.g. Baga Beach">
-              </div>
-              <div class="coord-row">
-                <div class="form-group coord-group">
-                  <label class="form-label" for="admin-manual-lat">Latitude</label>
-                  <input type="number" id="admin-manual-lat" class="form-input" placeholder="15.5523" step="any">
-                </div>
-                <div class="form-group coord-group">
-                  <label class="form-label" for="admin-manual-lng">Longitude</label>
-                  <input type="number" id="admin-manual-lng" class="form-input" placeholder="73.7771" step="any">
-                </div>
-              </div>
-              <button id="btn-add-manual" class="btn btn-primary" style="font-size:13px;">Add Place ➕</button>
-            </div>
-          </div>
-
-          <!-- Section: Itinerary Builder -->
-          <div class="admin-section-block">
-            <div class="admin-section-label">
-              🗓️ Itinerary Order
-              <span id="dest-count" class="dest-count-pill">0 places</span>
-            </div>
-            <div class="card admin-card">
-              <p class="admin-hint">Drag ⠿ to reorder. The first item is the starting point.</p>
-              <div id="admin-dest-list" class="admin-dest-list">
-                <div class="admin-dest-empty">No destinations added yet.</div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Section: Actions -->
-          <div class="admin-section-block admin-actions-block">
-            <button id="btn-save-draft" class="btn btn-secondary" style="box-shadow:0 3px 0 #1D4ED8;">
-              💾 Save Draft
-            </button>
-            <button id="btn-publish-bottom" class="btn btn-primary">
-              🚀 Publish to Group
-            </button>
-          </div>
-
-        </div>
-      </section>
-
-      <!-- ══════════════════════════════════════════════════
-           MODAL · SUPABASE SETUP
-      ══════════════════════════════════════════════════ -->
-      <div id="modal-supabase" class="modal-overlay" aria-hidden="true">
-        <div class="modal-box">
-          <div class="modal-box-title">⚡ Backend Setup</div>
-          <p class="modal-box-desc">
-            Connect your Supabase project to enable Google Sign-In, real-time chat, and cross-device sync.
-          </p>
-          <div class="form-group">
-            <label class="form-label" for="sb-url">Project URL</label>
-            <input type="text" id="sb-url" class="form-input" placeholder="https://xxxx.supabase.co">
-          </div>
-          <div class="form-group">
-            <label class="form-label" for="sb-key">Anon API Key</label>
-            <input type="password" id="sb-key" class="form-input" placeholder="eyJhbGciOi...">
-          </div>
-          <div id="sb-connection-status" class="sb-status"></div>
-          <div class="modal-box-actions">
-            <button id="btn-sb-cancel" class="btn btn-ghost">Cancel</button>
-            <button id="btn-sb-connect" class="btn btn-primary">Connect 🔌</button>
-          </div>
-        </div>
       </div>
+    </aside>
 
-    </div><!-- device-screen -->
-  </div><!-- device-wrapper -->
+    <!-- Map View -->
+    <main class="map-view">
+      <div id="map-container"></div>
+    </main>
+
+  </div>
+
+  <!-- Modal: Supabase Connection Setup -->
+  <div id="modal-supabase" class="modal-overlay" aria-hidden="true">
+    <div class="modal-box">
+      <div class="modal-box-title">⚡ Database Sync Setup</div>
+      <p class="modal-box-desc">
+        Connect your Supabase project to enable real-time sync across devices. Leave empty to run entirely offline (local browser storage).
+      </p>
+      <div class="form-group">
+        <label class="form-label" for="sb-url">Supabase Project URL</label>
+        <input type="text" id="sb-url" class="form-input" placeholder="https://xxxx.supabase.co">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="sb-key">Supabase Anon API Key</label>
+        <input type="password" id="sb-key" class="form-input" placeholder="eyJhbGciOi...">
+      </div>
+      <div id="sb-connection-status" class="sb-status"></div>
+      <div class="modal-box-actions">
+        <button id="btn-sb-cancel" class="btn btn-ghost">Cancel</button>
+        <button id="btn-sb-connect" class="btn btn-primary">Connect 🔌</button>
+      </div>
+    </div>
+  </div>
 
   <script type="module" src="js/app.js"></script>
 </body>

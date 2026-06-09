@@ -1,40 +1,195 @@
 // ═══════════════════════════════════════════════════════════
 // TripQuest · App Orchestrator
-// Manages all screens, tabs, and feature logic
 // ═══════════════════════════════════════════════════════════
 
 import {
-  getClient, isConnected, testConnection, getCredentials, saveCredentials,
-  getSession, onAuthChange, getLocalSession,
-  signInWithGoogle, signInWithEmail, signUpWithEmail, signOut,
-  getProfile, createProfile,
-  getPublishedTrip, getAllTrips, saveTrip, publishTrip,
-  getDestinations, saveDestinations,
-  getChatMessages, sendChatMessage,
-  subscribeToChatMessages, subscribeToItinerary
+  isConnected, testConnection, getCredentials, saveCredentials,
+  loadActiveTrip, saveActiveTrip, loadDestinations, saveDestinations
 } from './supabase.js';
 
-// ── App-level state ──────────────────────────────────────
-const App = {
-  session: null,      // Supabase session object
-  profile: null,      // { id, display_name, profile_photo, is_admin }
-  trip: null,         // active published trip
-  destinations: [],   // ordered list with computed distances
-  messages: [],       // chat messages
-  adminDrafts: [],    // admin panel working list
-  adminTripId: null,  // id of trip being edited
-  unsubChat: null,    // cleanup fn for chat subscription
-  unsubItinerary: null,// cleanup fn for itinerary subscription
-  unreadChat: 0       // unread chat count
+// ── In-Memory Application State ──────────────────────────
+const State = {
+  trip: { id: 'local_trip_id', name: 'My Goa Itinerary' },
+  importedPlaces: [], // List of places available to add
+  destinations: [],   // Active itinerary list
+  isSimulating: false,
+  simulatedMinutes: 720, // 12:00 PM
+  map: null,
+  markersLayer: null,
+  routeLine: null,
+  activeStopIndex: null,
+  isTransit: false,
+  transitFrom: null,
+  transitTo: null
 };
 
-// Profile photo selected in profile setup
-let setupPhotoBase64 = null;
+// Category colors for Leaflet markers
+const CategoryColors = {
+  Attraction: '#F59E0B', // Yellow
+  Cafe: '#FF6B4A',       // Coral/Orange
+  Restaurant: '#EC4899', // Pink
+  Hotel: '#3B82F6',      // Blue
+  Activity: '#10B981',   // Green
+  Custom: '#8B5CF6'      // Purple
+};
 
-// ── Helpers ───────────────────────────────────────────────
+const CategoryEmojis = {
+  Attraction: '🎯',
+  Cafe: '☕',
+  Restaurant: '🍜',
+  Hotel: '🏨',
+  Activity: '🏄',
+  Custom: '📍'
+};
 
+// ── Boot Application ──────────────────────────────────────
+document.addEventListener('DOMContentLoaded', async () => {
+  // 1. Initial State Load
+  await loadState();
+
+  // 2. Bind UI Event Listeners
+  bindEvents();
+
+  // 3. Initialize Leaflet Map
+  initLeafletMap();
+
+  // 4. Render Initial Views
+  renderAll();
+
+  // 5. Start Clock Ticker
+  startClock();
+});
+
+// ── Load & Save State ─────────────────────────────────────
+async function loadState() {
+  // Load saved places pool
+  try {
+    const rawSaved = localStorage.getItem('tq_imported_places');
+    State.importedPlaces = rawSaved ? JSON.parse(rawSaved) : [];
+  } catch (e) {
+    State.importedPlaces = [];
+  }
+
+  // Load trip and destinations from Supabase or localStorage
+  const activeTrip = await loadActiveTrip();
+  if (activeTrip) {
+    State.trip = activeTrip;
+  } else {
+    // Save a default local trip if none exists
+    await saveActiveTrip(State.trip);
+  }
+
+  document.getElementById('trip-name').value = State.trip.name || '';
+
+  const dests = await loadDestinations(State.trip.id);
+  State.destinations = dests || [];
+  
+  // Backwards compatibility/fallback: ensure all destinations have duration and category
+  State.destinations.forEach((d, idx) => {
+    if (!d.id) d.id = 'dest_' + idx + '_' + Date.now();
+    if (!d.duration) d.duration = 90;
+    if (!d.category) d.category = 'Attraction';
+  });
+}
+
+async function saveTripDetails() {
+  const tripNameInput = document.getElementById('trip-name').value.trim();
+  State.trip.name = tripNameInput || 'My Itinerary';
+  await saveActiveTrip(State.trip);
+  showToast('Trip details saved!', 'success');
+}
+
+async function saveItineraryState() {
+  // Recalculate timings sequentially starting from the first stop's time
+  recalculateScheduleTimings();
+
+  // Save to Database / LocalStorage
+  const saved = await saveDestinations(State.trip.id, State.destinations);
+  if (saved) {
+    // Keep local IDs mapped to any generated UUIDs
+    State.destinations = saved.map(d => ({
+      ...d,
+      id: d.id || 'dest_' + Math.random().toString(36).substr(2, 9)
+    }));
+  }
+  
+  renderTimeline();
+  drawRouteOnMap();
+}
+
+// ── Timing Helpers ────────────────────────────────────────
+function formatMinutes(minutes) {
+  const hrs = Math.floor(minutes / 60) % 24;
+  const mins = minutes % 60;
+  const ampm = hrs >= 12 ? 'PM' : 'AM';
+  const displayHrs = hrs % 12 || 12;
+  const displayMins = mins < 10 ? '0' + mins : mins;
+  return `${displayHrs}:${displayMins} ${ampm}`;
+}
+
+function parseTimeToMinutes(timeStr) {
+  if (!timeStr) return 540; // Default 9:00 AM
+  const match = timeStr.match(/^(\d+):(\d+)\s*(AM|PM)$/i);
+  if (!match) {
+    // Fallback: Try reading HH:MM 24h format
+    const match24 = timeStr.match(/^(\d{1,2}):(\d{2})$/);
+    if (match24) {
+      return parseInt(match24[1]) * 60 + parseInt(match24[2]);
+    }
+    return 540;
+  }
+  let hrs = parseInt(match[1]);
+  const mins = parseInt(match[2]);
+  const ampm = match[3].toUpperCase();
+  if (ampm === 'PM' && hrs < 12) hrs += 12;
+  if (ampm === 'AM' && hrs === 12) hrs = 0;
+  return hrs * 60 + mins;
+}
+
+function getCurrentMinutesFromMidnight() {
+  const now = new Date();
+  return now.getHours() * 60 + now.getMinutes();
+}
+
+/** 
+ * Automatically sequences all stops sequentially starting from the first stop's time.
+ * Calculates transit times between consecutive stops.
+ */
+function recalculateScheduleTimings() {
+  if (State.destinations.length === 0) return;
+
+  // Set the start time of the first stop to whatever is currently entered
+  let currentTime = parseTimeToMinutes(State.destinations[0].time);
+  State.destinations[0].time = formatMinutes(currentTime);
+
+  for (let i = 0; i < State.destinations.length; i++) {
+    const stop = State.destinations[i];
+    
+    // Assign calculated start time to this stop
+    stop.time = formatMinutes(currentTime);
+    
+    // Add visit duration
+    const duration = parseInt(stop.duration) || 60;
+    
+    if (i < State.destinations.length - 1) {
+      // Calculate transit time to the next stop
+      const nextStop = State.destinations[i + 1];
+      const dist = haversineKm(stop.lat, stop.lng, nextStop.lat, nextStop.lng);
+      const isWalking = dist < 1.2;
+      // walking speed ~5km/h = 12min/km, driving speed ~30km/h = 2min/km
+      const speed = isWalking ? 5 : 30;
+      const transitMins = Math.max(5, Math.round((dist / speed) * 60));
+      
+      // Update next stop's start time by adding duration + transit buffer
+      currentTime += duration + transitMins;
+    }
+  }
+}
+
+// ── Geodesic Distance Helpers ─────────────────────────────
 function haversineKm(lat1, lng1, lat2, lng2) {
-  const R = 6371;
+  if (!lat1 || !lng1 || !lat2 || !lng2) return 0;
+  const R = 6371; // Earth radius
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLng = (lng2 - lng1) * Math.PI / 180;
   const a = Math.sin(dLat / 2) ** 2 +
@@ -48,1020 +203,872 @@ function formatDistance(km) {
   return `${km.toFixed(1)} km`;
 }
 
-function estimateTravelTime(km) {
-  // < 1 km → walk at 5 km/h, else drive at 30 km/h
-  if (km < 1) {
-    const mins = Math.ceil((km / 5) * 60);
-    return `~${mins} min walk`;
+function estimateTransit(km) {
+  if (km < 1.2) {
+    const mins = Math.max(3, Math.round((km / 5) * 60));
+    return { mode: 'Walk 🚶', mins, desc: `~${mins} min walk` };
   }
-  const mins = Math.ceil((km / 30) * 60);
-  return `~${mins} min drive`;
+  const mins = Math.max(5, Math.round((km / 30) * 60));
+  return { mode: 'Drive 🚗', mins, desc: `~${mins} min drive` };
 }
 
-function formatChatTime(isoStr) {
-  const d = new Date(isoStr);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+// ── UI Rendering ──────────────────────────────────────────
+function renderAll() {
+  renderSavedPlacesPool();
+  renderTimeline();
 }
 
-function showToast(message, type = 'info', duration = 3000) {
-  const container = document.getElementById('toast-container');
-  const toast = document.createElement('div');
-  toast.className = `toast ${type}`;
-  const icons = { success: '✅', warning: '⚠️', error: '❌', info: 'ℹ️' };
-  toast.innerHTML = `<span>${icons[type] || 'ℹ️'}</span><span>${message}</span>`;
-  container.appendChild(toast);
-  setTimeout(() => toast.remove(), duration);
-}
+function renderSavedPlacesPool() {
+  const container = document.getElementById('saved-places-pool');
+  const countEl = document.getElementById('saved-count');
+  if (!container) return;
 
-// ── Screen / Tab Routing ──────────────────────────────────
+  countEl.textContent = State.importedPlaces.length;
 
-function showScreen(id) {
-  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-  const el = document.getElementById(id);
-  if (el) el.classList.add('active');
-}
-
-function showTab(tabId) {
-  // Update nav buttons
-  document.querySelectorAll('.nav-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.tab === tabId);
-  });
-
-  // Show correct pane
-  ['itinerary', 'tasks', 'chat'].forEach(t => {
-    const pane = document.getElementById(`tab-${t}`);
-    if (pane) {
-      pane.style.display = (t === tabId) ? 'flex' : 'none';
-      pane.classList.toggle('active', t === tabId);
-    }
-  });
-
-  // Clear unread badge when chat opened
-  if (tabId === 'chat') {
-    App.unreadChat = 0;
-    updateChatBadge();
-    scrollChatToBottom();
-  }
-}
-
-function updateChatBadge() {
-  const badge = document.getElementById('chat-badge');
-  if (!badge) return;
-  if (App.unreadChat > 0) {
-    badge.textContent = App.unreadChat > 9 ? '9+' : App.unreadChat;
-    badge.style.display = 'block';
-  } else {
-    badge.style.display = 'none';
-  }
-}
-
-// ══════════════════════════════════════════════════════════
-// BOOT — called on DOMContentLoaded
-// ══════════════════════════════════════════════════════════
-
-document.addEventListener('DOMContentLoaded', async () => {
-  // Register service worker
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('./sw.js').catch(() => {});
-  }
-
-  // Bind all events first (safe order)
-  bindAuthScreenEvents();
-  bindProfileSetupEvents();
-  bindAppEvents();
-  bindAdminEvents();
-  bindSupabaseModalEvents();
-
-  // Prefill Supabase credentials if already saved
-  const creds = getCredentials();
-  if (creds.url) document.getElementById('sb-url').value = creds.url;
-  if (creds.key) document.getElementById('sb-key').value = creds.key;
-
-  // Listen for auth state changes from Supabase (handles OAuth redirect)
-  onAuthChange(async (event, session) => {
-    if (event === 'SIGNED_IN' && session) {
-      await handleSignedInSession(session);
-    } else if (event === 'SIGNED_OUT') {
-      handleSignedOut();
-    }
-  });
-
-  // Check for existing session
-  const session = await getSession();
-  if (session) {
-    await handleSignedInSession(session);
+  if (State.importedPlaces.length === 0) {
+    container.innerHTML = '<div class="pool-empty-hint">Import Google Maps places to start building your itinerary.</div>';
     return;
   }
 
-  // Check local fallback session
-  const localSession = getLocalSession();
-  if (localSession) {
-    await handleSignedInSession(localSession);
-    return;
-  }
-
-  // No session — show auth screen
-  showScreen('screen-auth');
-});
-
-// ══════════════════════════════════════════════════════════
-// AUTH FLOW
-// ══════════════════════════════════════════════════════════
-
-/** After session is established (Google redirect or email login) */
-async function handleSignedInSession(session) {
-  App.session = session;
-  const userId = session.user.id;
-
-  // Check if profile exists
-  const profile = await getProfile(userId);
-
-  if (profile && profile.display_name) {
-    // ── RETURNING USER ── skip profile setup
-    App.profile = profile;
-    await enterMainApp();
-  } else {
-    // ── FIRST TIME USER ── show profile setup
-    // Pre-fill name from Google metadata if available
-    const googleName = session.user.user_metadata?.full_name
-      || session.user.user_metadata?.name
-      || '';
-    const nameInput = document.getElementById('setup-display-name');
-    if (nameInput && googleName) nameInput.value = googleName;
-
-    // Pre-show Google avatar if available
-    const googlePhoto = session.user.user_metadata?.avatar_url
-      || session.user.user_metadata?.picture
-      || '';
-    if (googlePhoto) {
-      const letter = document.getElementById('setup-photo-letter');
-      const img = document.getElementById('setup-photo-img');
-      if (letter) letter.style.display = 'none';
-      if (img) { img.src = googlePhoto; img.style.display = 'block'; }
-    } else if (googleName) {
-      const letter = document.getElementById('setup-photo-letter');
-      if (letter) letter.textContent = googleName.charAt(0).toUpperCase();
-    }
-
-    showScreen('screen-profile-setup');
-  }
-}
-
-function handleSignedOut() {
-  App.session = null;
-  App.profile = null;
-  App.trip = null;
-  App.destinations = [];
-  App.messages = [];
-  if (App.unsubChat) { App.unsubChat(); App.unsubChat = null; }
-  if (App.unsubItinerary) { App.unsubItinerary(); App.unsubItinerary = null; }
-  showScreen('screen-auth');
-}
-
-/** Enter the main 3-tab application */
-async function enterMainApp() {
-  // Update header avatar
-  updateHeaderAvatar();
-
-  // Load itinerary
-  await loadItinerary();
-
-  // Load chat
-  await loadChat();
-
-  showScreen('screen-app');
-  showTab('itinerary');
-}
-
-// ── Auth Screen Events ──
-
-function bindAuthScreenEvents() {
-  // Google Sign In
-  document.getElementById('btn-google-signin').addEventListener('click', async () => {
-    if (!isConnected()) {
-      showToast('Please configure the Supabase backend first (⚡ Setup Backend)', 'warning', 4000);
-      return;
-    }
-    try {
-      await signInWithGoogle();
-      // Page will redirect — Supabase handles the rest via onAuthChange
-    } catch (err) {
-      showToast(err.message || 'Google sign-in failed.', 'error');
-    }
-  });
-
-  // Email tab switcher
-  const tabLogin = document.getElementById('tab-login');
-  const tabSignup = document.getElementById('tab-signup');
-  const nameRow = document.getElementById('auth-name-row');
-  const authBtn = document.getElementById('btn-email-auth');
-
-  let authMode = 'login';
-
-  tabLogin.addEventListener('click', () => {
-    authMode = 'login';
-    tabLogin.classList.add('active');
-    tabSignup.classList.remove('active');
-    nameRow.style.display = 'none';
-    authBtn.textContent = 'Log In →';
-  });
-
-  tabSignup.addEventListener('click', () => {
-    authMode = 'signup';
-    tabSignup.classList.add('active');
-    tabLogin.classList.remove('active');
-    nameRow.style.display = 'block';
-    authBtn.textContent = 'Sign Up →';
-  });
-
-  // Email auth submit
-  authBtn.addEventListener('click', async () => {
-    const email = document.getElementById('auth-email').value.trim();
-    const password = document.getElementById('auth-password').value.trim();
-
-    if (!email || !password) {
-      showToast('Please enter email and password.', 'warning');
-      return;
-    }
-
-    authBtn.textContent = '...';
-    authBtn.disabled = true;
-
-    try {
-      let session;
-      if (authMode === 'signup') {
-        session = await signUpWithEmail(email, password);
-        if (!session) {
-          showToast('Check your email to confirm your account, then log in.', 'info', 5000);
-          authBtn.textContent = 'Sign Up →';
-          authBtn.disabled = false;
-          return;
-        }
-      } else {
-        session = await signInWithEmail(email, password);
-      }
-
-      if (session) {
-        await handleSignedInSession(session);
-      }
-    } catch (err) {
-      showToast(err.message || 'Authentication failed.', 'error');
-    } finally {
-      authBtn.textContent = authMode === 'login' ? 'Log In →' : 'Sign Up →';
-      authBtn.disabled = false;
-    }
-  });
-
-  // Enter key in password
-  document.getElementById('auth-password').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') document.getElementById('btn-email-auth').click();
-  });
-
-  // Open Supabase setup
-  document.getElementById('btn-open-sb-setup').addEventListener('click', () => {
-    document.getElementById('modal-supabase').classList.add('open');
-  });
-}
-
-// ══════════════════════════════════════════════════════════
-// PROFILE SETUP (FIRST TIME)
-// ══════════════════════════════════════════════════════════
-
-function bindProfileSetupEvents() {
-  const photoFile = document.getElementById('setup-photo-file');
-  const photoLetter = document.getElementById('setup-photo-letter');
-  const photoImg = document.getElementById('setup-photo-img');
-  const removeBtn = document.getElementById('btn-remove-setup-photo');
-  const nameInput = document.getElementById('setup-display-name');
-
-  // Name → update letter preview
-  nameInput.addEventListener('input', () => {
-    if (!setupPhotoBase64 && photoImg.style.display === 'none') {
-      photoLetter.textContent = nameInput.value.trim().charAt(0).toUpperCase() || '?';
-    }
-  });
-
-  // Photo file picker
-  photoFile.addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    if (!file.type.startsWith('image/')) {
-      showToast('Please select an image file.', 'warning');
-      return;
-    }
-    if (file.size > 5 * 1024 * 1024) {
-      showToast('Image must be under 5MB.', 'warning');
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      setupPhotoBase64 = ev.target.result;
-      photoImg.src = setupPhotoBase64;
-      photoImg.style.display = 'block';
-      photoLetter.style.display = 'none';
-      if (removeBtn) removeBtn.style.display = 'inline-block';
-      showToast('Photo selected!', 'success');
-    };
-    reader.readAsDataURL(file);
-  });
-
-  // Remove photo
-  if (removeBtn) {
-    removeBtn.addEventListener('click', () => {
-      setupPhotoBase64 = null;
-      photoImg.style.display = 'none';
-      photoImg.src = '';
-      photoLetter.style.display = 'block';
-      photoLetter.textContent = nameInput.value.trim().charAt(0).toUpperCase() || '?';
-      removeBtn.style.display = 'none';
-      photoFile.value = '';
-    });
-  }
-
-  // Save profile
-  document.getElementById('btn-save-profile').addEventListener('click', async () => {
-    const name = nameInput.value.trim();
-    if (!name) {
-      showToast('Please enter your display name.', 'warning');
-      nameInput.focus();
-      return;
-    }
-
-    const btn = document.getElementById('btn-save-profile');
-    btn.textContent = 'Saving...';
-    btn.disabled = true;
-
-    try {
-      const userId = App.session.user.id;
-
-      // Use Google photo if no custom photo selected but Google avatar available
-      const googlePhoto = App.session.user.user_metadata?.avatar_url
-        || App.session.user.user_metadata?.picture
-        || null;
-      const finalPhoto = setupPhotoBase64 || googlePhoto || null;
-
-      const profile = await createProfile(userId, name, finalPhoto);
-      App.profile = profile;
-      setupPhotoBase64 = null;
-
-      showToast(`Welcome, ${name}! 🎉`, 'success');
-      await enterMainApp();
-    } catch (err) {
-      showToast(err.message || 'Failed to save profile.', 'error');
-    } finally {
-      btn.textContent = 'Start Exploring 🚀';
-      btn.disabled = false;
-    }
-  });
-}
-
-// ══════════════════════════════════════════════════════════
-// MAIN APP
-// ══════════════════════════════════════════════════════════
-
-function bindAppEvents() {
-  // Bottom nav
-  document.querySelectorAll('.nav-btn').forEach(btn => {
-    btn.addEventListener('click', () => showTab(btn.dataset.tab));
-  });
-
-  // Admin button
-  document.getElementById('btn-open-admin').addEventListener('click', async () => {
-    await loadAdminPanel();
-    showScreen('screen-admin');
-  });
-
-  // Chat send
-  const chatInput = document.getElementById('chat-input');
-  const sendBtn = document.getElementById('btn-chat-send');
-
-  const doSend = async () => {
-    const text = chatInput.value.trim();
-    if (!text) return;
-    chatInput.value = '';
-
-    if (!App.trip) {
-      showToast('No active trip to chat in.', 'warning');
-      return;
-    }
-
-    try {
-      const msg = await sendChatMessage(
-        App.trip.id,
-        App.session.user.id,
-        App.profile.display_name,
-        App.profile.profile_photo,
-        text
-      );
-      // For local fallback, append immediately
-      if (!getClient()) {
-        appendChatMessage(msg);
-        scrollChatToBottom();
-      }
-    } catch (err) {
-      showToast('Failed to send message.', 'error');
-    }
-  };
-
-  sendBtn.addEventListener('click', doSend);
-  chatInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
-  });
-}
-
-function updateHeaderAvatar() {
-  const letterEl = document.getElementById('header-avatar-letter');
-  const imgEl = document.getElementById('header-avatar-img');
-
-  if (!App.profile) return;
-
-  if (App.profile.profile_photo) {
-    imgEl.src = App.profile.profile_photo;
-    imgEl.style.display = 'block';
-    letterEl.style.display = 'none';
-  } else {
-    letterEl.textContent = (App.profile.display_name || '?').charAt(0).toUpperCase();
-    letterEl.style.display = 'flex';
-    imgEl.style.display = 'none';
-  }
-}
-
-// ── Itinerary ──
-
-async function loadItinerary() {
-  const trip = await getPublishedTrip();
-  App.trip = trip;
-
-  if (!trip) {
-    document.getElementById('itinerary-empty').style.display = 'flex';
-    document.getElementById('itinerary-list').style.display = 'none';
-    document.getElementById('trip-banner').style.display = 'none';
-    return;
-  }
-
-  // Load destinations
-  const dests = await getDestinations(trip.id);
-  App.destinations = computeDistances(dests);
-
-  renderItinerary();
-
-  // Subscribe to live itinerary updates
-  if (App.unsubItinerary) App.unsubItinerary();
-  App.unsubItinerary = subscribeToItinerary(trip.id, async () => {
-    const updated = await getDestinations(trip.id);
-    App.destinations = computeDistances(updated);
-    renderItinerary();
-  });
-}
-
-/** Compute cumulative distances between consecutive destinations */
-function computeDistances(dests) {
-  return dests.map((d, i) => {
-    if (i === 0 || !d.lat || !d.lng || !dests[i - 1].lat || !dests[i - 1].lng) {
-      return { ...d, distanceKm: null, travelTime: null };
-    }
-    const prev = dests[i - 1];
-    const km = haversineKm(prev.lat, prev.lng, d.lat, d.lng);
-    return { ...d, distanceKm: km, travelTime: estimateTravelTime(km) };
-  });
-}
-
-function renderItinerary() {
-  const trip = App.trip;
-  const dests = App.destinations;
-
-  const emptyEl = document.getElementById('itinerary-empty');
-  const listEl = document.getElementById('itinerary-list');
-  const bannerEl = document.getElementById('trip-banner');
-
-  if (!trip || dests.length === 0) {
-    emptyEl.style.display = 'flex';
-    listEl.style.display = 'none';
-    bannerEl.style.display = !trip ? 'none' : 'flex';
-    return;
-  }
-
-  emptyEl.style.display = 'none';
-  listEl.style.display = 'flex';
-
-  // Trip Banner
-  bannerEl.style.display = 'flex';
-  document.getElementById('trip-banner-name').textContent = trip.name || 'Our Trip';
-  const descEl = document.getElementById('trip-banner-desc');
-  descEl.textContent = trip.description || '';
-  descEl.style.display = trip.description ? 'block' : 'none';
-  const dateEl = document.getElementById('trip-banner-date');
-  if (trip.start_date) {
-    const d = new Date(trip.start_date + 'T00:00:00');
-    dateEl.textContent = '📅 ' + d.toLocaleDateString('en-US', { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric' });
-    dateEl.style.display = 'block';
-  } else {
-    dateEl.style.display = 'none';
-  }
-
-  // Destination list
-  listEl.innerHTML = '';
-
-  dests.forEach((dest, i) => {
-    const isFirst = i === 0;
-    const isLast = i === dests.length - 1;
-
-    const stopEl = document.createElement('div');
-    stopEl.className = 'itinerary-stop';
-
-    // Number column
-    const numCol = document.createElement('div');
-    numCol.className = 'stop-number-col';
-
-    const numBadge = document.createElement('div');
-    numBadge.className = `stop-number${isFirst ? ' first-stop' : ''}`;
-    numBadge.textContent = isFirst ? '⭐' : i + 1;
-    numCol.appendChild(numBadge);
-
-    if (!isLast) {
-      const connector = document.createElement('div');
-      connector.className = 'stop-connector';
-      numCol.appendChild(connector);
-    }
-
-    // Stop card
+  container.innerHTML = '';
+  State.importedPlaces.forEach((place, idx) => {
     const card = document.createElement('div');
-    card.className = 'stop-card';
-
-    // Thumbnail
-    let thumbHtml = '';
-    if (dest.thumbnail) {
-      thumbHtml = `<img src="${dest.thumbnail}" alt="${dest.name}" class="stop-thumb" loading="lazy" onerror="this.style.display='none'">`;
-    }
-
-    // Distance badge
-    let distHtml = '';
-    if (i === 0) {
-      distHtml = `<div class="stop-label-starting">📍 Starting Point</div>`;
-    } else if (dest.distanceKm !== null) {
-      distHtml = `
-        <div class="stop-distance-badge">
-          <span class="stop-distance-icon">↓</span>
-          <span class="stop-distance-km">${formatDistance(dest.distanceKm)}</span>
-          <span class="stop-travel-time">· ${dest.travelTime}</span>
-        </div>
-      `;
-    }
-
-    // Maps link
-    let mapsLinkHtml = '';
-    const mapsQuery = dest.lat && dest.lng
-      ? `https://www.google.com/maps/search/?api=1&query=${dest.lat},${dest.lng}`
-      : (dest.maps_url || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(dest.name)}`);
-    mapsLinkHtml = `<a href="${mapsQuery}" target="_blank" class="stop-maps-link">🗺️ Open in Google Maps</a>`;
+    card.className = 'saved-place-card';
+    
+    const emoji = CategoryEmojis[place.category] || '📍';
+    const coordsStr = place.lat && place.lng ? `${place.lat.toFixed(4)}, ${place.lng.toFixed(4)}` : 'No coordinates';
 
     card.innerHTML = `
-      <div class="stop-name">${dest.name}</div>
-      ${distHtml}
-      ${dest.description ? `<p class="stop-desc">${dest.description}</p>` : ''}
-      ${thumbHtml}
-      ${mapsLinkHtml}
+      <div class="place-info-block">
+        <div class="place-title-row">
+          <span class="category-badge" title="${place.category}">${emoji}</span>
+          <span class="place-name" title="${place.name}">${place.name}</span>
+        </div>
+        <span class="place-coords">${coordsStr}</span>
+      </div>
+      <div class="place-actions">
+        <button class="btn-add-pool" data-idx="${idx}" title="Add to Itinerary">+</button>
+        <button class="btn-delete-pool" data-idx="${idx}" title="Delete from pool">✕</button>
+      </div>
     `;
 
-    stopEl.appendChild(numCol);
-    stopEl.appendChild(card);
-    listEl.appendChild(stopEl);
+    // Map flyTo on hover
+    card.addEventListener('mouseenter', () => {
+      if (place.lat && place.lng && State.map) {
+        State.map.flyTo([place.lat, place.lng], 14);
+      }
+    });
+
+    container.appendChild(card);
+  });
+
+  // Bind pool buttons
+  container.querySelectorAll('.btn-add-pool').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const idx = parseInt(e.target.dataset.idx);
+      addPlaceToItinerary(idx);
+    });
+  });
+
+  container.querySelectorAll('.btn-delete-pool').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const idx = parseInt(e.target.dataset.idx);
+      deleteFromPool(idx);
+    });
   });
 }
 
-// ── Chat ──
-
-async function loadChat() {
-  if (!App.trip) return;
-
-  const messages = await getChatMessages(App.trip.id);
-  App.messages = messages;
-  renderAllMessages();
-
-  // Subscribe to new messages
-  if (App.unsubChat) App.unsubChat();
-  App.unsubChat = subscribeToChatMessages(App.trip.id, (newMsg) => {
-    // Avoid duplicates
-    if (App.messages.find(m => m.id === newMsg.id)) return;
-    App.messages.push(newMsg);
-    appendChatMessage(newMsg);
-    scrollChatToBottom();
-
-    // Badge if chat not active
-    const chatPane = document.getElementById('tab-chat');
-    const isVisible = chatPane && chatPane.classList.contains('active');
-    if (!isVisible) {
-      App.unreadChat++;
-      updateChatBadge();
-    }
-  });
-}
-
-function renderAllMessages() {
-  const container = document.getElementById('chat-messages');
+function renderTimeline() {
+  const container = document.getElementById('timeline-list');
   if (!container) return;
-  container.innerHTML = '';
 
-  if (App.messages.length === 0) {
-    container.innerHTML = '<div class="chat-empty-hint">Say hi to the group! 👋</div>';
+  if (State.destinations.length === 0) {
+    container.innerHTML = '<div class="timeline-empty-hint">Add places from your Saved Places pool.</div>';
     return;
   }
 
-  App.messages.forEach(msg => appendChatMessage(msg, false));
-  scrollChatToBottom();
-}
+  container.innerHTML = '';
+  State.destinations.forEach((stop, idx) => {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'timeline-stop-wrapper';
+    wrapper.dataset.index = idx;
+    
+    // Add active class if this stop is the currently active one
+    if (idx === State.activeStopIndex && !State.isTransit) {
+      wrapper.classList.add('active');
+    }
 
-function appendChatMessage(msg, scroll = true) {
-  const container = document.getElementById('chat-messages');
-  if (!container) return;
+    const emoji = CategoryEmojis[stop.category] || '📍';
 
-  // Remove empty hint if present
-  const hint = container.querySelector('.chat-empty-hint');
-  if (hint) hint.remove();
+    wrapper.innerHTML = `
+      <div class="timeline-node-dot"></div>
+      <div class="timeline-stop-card" draggable="true">
+        <span class="drag-handle">⠿</span>
+        <div class="stop-main-info">
+          <div class="stop-title-row">
+            <span class="category-badge" title="${stop.category}">${emoji}</span>
+            <span class="stop-title" title="${stop.name}">${stop.name}</span>
+          </div>
+          <div class="stop-time-settings">
+            <div class="time-input-wrap">
+              <span>Start</span>
+              <input type="text" class="input-time-schedule" data-idx="${idx}" value="${stop.time}" ${idx > 0 ? 'disabled' : ''} placeholder="e.g. 10:00 AM">
+            </div>
+            <div class="time-input-wrap">
+              <span>Duration</span>
+              <input type="number" class="input-duration" data-idx="${idx}" min="5" max="480" value="${stop.duration}">
+              <span>min</span>
+            </div>
+          </div>
+        </div>
+        <button class="btn-delete-stop" data-idx="${idx}" title="Remove stop">✕</button>
+      </div>
+    `;
 
-  const isMe = App.session && msg.user_id === App.session.user.id;
-  const bubble = document.createElement('div');
-  bubble.className = `chat-msg ${isMe ? 'mine' : 'theirs'}`;
-
-  // Avatar: photo or letter
-  let avatarHtml;
-  if (msg.profile_photo) {
-    avatarHtml = `<img src="${msg.profile_photo}" alt="${msg.display_name}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">`;
-  } else {
-    const colors = ['#FF6B4A','#3B82F6','#8B5CF6','#10B981','#F59E0B'];
-    const colorIdx = msg.display_name.charCodeAt(0) % colors.length;
-    avatarHtml = `<span style="color:#fff; font-size:12px; font-weight:800; background:${colors[colorIdx]}; width:100%; height:100%; display:flex; align-items:center; justify-content:center; border-radius:50%;">${msg.display_name.charAt(0).toUpperCase()}</span>`;
-  }
-
-  bubble.innerHTML = `
-    <div class="chat-msg-avatar">${avatarHtml}</div>
-    <div class="chat-msg-body">
-      ${!isMe ? `<div class="chat-msg-name">${msg.display_name}</div>` : ''}
-      <div class="chat-msg-bubble">${escapeHtml(msg.text)}</div>
-      <div class="chat-msg-time">${formatChatTime(msg.created_at)}</div>
-    </div>
-  `;
-
-  container.appendChild(bubble);
-  if (scroll) scrollChatToBottom();
-}
-
-function scrollChatToBottom() {
-  const container = document.getElementById('chat-messages');
-  if (container) container.scrollTop = container.scrollHeight;
-}
-
-function escapeHtml(str) {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
-}
-
-// ══════════════════════════════════════════════════════════
-// ADMIN PANEL
-// ══════════════════════════════════════════════════════════
-
-async function loadAdminPanel() {
-  // Load existing draft trip if any
-  const trips = await getAllTrips();
-  const draft = trips[0]; // most recent
-
-  if (draft) {
-    App.adminTripId = draft.id;
-    document.getElementById('admin-trip-name').value = draft.name || '';
-    document.getElementById('admin-trip-desc').value = draft.description || '';
-    document.getElementById('admin-trip-date').value = draft.start_date || '';
-
-    const dests = await getDestinations(draft.id);
-    App.adminDrafts = dests.map(d => ({ ...d }));
-  } else {
-    App.adminTripId = null;
-    App.adminDrafts = [];
-    document.getElementById('admin-trip-name').value = '';
-    document.getElementById('admin-trip-desc').value = '';
-    document.getElementById('admin-trip-date').value = '';
-  }
-
-  renderAdminDestList();
-}
-
-function bindAdminEvents() {
-  // Back
-  document.getElementById('btn-admin-back').addEventListener('click', () => {
-    showScreen('screen-app');
-  });
-
-  // Import from Google Maps URL
-  document.getElementById('btn-import-url').addEventListener('click', async () => {
-    const urlInput = document.getElementById('admin-url-input');
-    const url = urlInput.value.trim();
-    if (!url) { showToast('Please paste a Google Maps URL.', 'warning'); return; }
-
-    const btn = document.getElementById('btn-import-url');
-    const progress = document.getElementById('import-progress');
-    btn.disabled = true;
-    btn.textContent = 'Importing...';
-    progress.style.display = 'flex';
-
-    try {
-      const place = await importFromMapsUrl(url);
-      if (!place || !place.name) {
-        showToast('Could not parse the URL. Try adding manually.', 'warning');
-        return;
+    // Add flyTo on click
+    wrapper.querySelector('.stop-title').addEventListener('click', () => {
+      if (stop.lat && stop.lng && State.map) {
+        State.map.flyTo([stop.lat, stop.lng], 15);
       }
+    });
 
-      App.adminDrafts.push({
-        id: 'tmp_' + Date.now(),
-        name: place.name,
-        lat: place.lat,
-        lng: place.lng,
-        maps_url: url,
-        thumbnail: place.thumbnail || null,
-        description: null
-      });
+    container.appendChild(wrapper);
 
-      renderAdminDestList();
-      urlInput.value = '';
-      showToast(`📍 "${place.name}" imported!`, 'success');
-    } catch (err) {
-      showToast(err.message || 'Import failed. Add manually instead.', 'error');
-    } finally {
-      btn.disabled = false;
-      btn.textContent = 'Import from Google Maps ⚡';
-      progress.style.display = 'none';
+    // If not the last stop, append transit info card
+    if (idx < State.destinations.length - 1) {
+      const nextStop = State.destinations[idx + 1];
+      const dist = haversineKm(stop.lat, stop.lng, nextStop.lat, nextStop.lng);
+      const transit = estimateTransit(dist);
+
+      const transitNode = document.createElement('div');
+      transitNode.className = 'timeline-transit-node';
+      transitNode.innerHTML = `
+        <span class="transit-icon">${transit.mode.split(' ')[0]}</span>
+        <span class="transit-details">${transit.mode.split(' ')[1]} ${formatDistance(dist)} (${transit.desc})</span>
+      `;
+      container.appendChild(transitNode);
     }
   });
 
-  // Add manual place
-  document.getElementById('btn-add-manual').addEventListener('click', () => {
-    const name = document.getElementById('admin-manual-name').value.trim();
-    const lat = parseFloat(document.getElementById('admin-manual-lat').value) || null;
-    const lng = parseFloat(document.getElementById('admin-manual-lng').value) || null;
+  // Bind inputs and delete buttons
+  container.querySelectorAll('.btn-delete-stop').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const idx = parseInt(e.target.dataset.idx);
+      removePlaceFromItinerary(idx);
+    });
+  });
 
-    if (!name) { showToast('Please enter a place name.', 'warning'); return; }
+  container.querySelectorAll('.input-time-schedule').forEach(input => {
+    input.addEventListener('change', (e) => {
+      const idx = parseInt(e.target.dataset.idx);
+      const val = e.target.value.trim();
+      State.destinations[idx].time = val;
+      saveItineraryState();
+    });
+  });
 
-    App.adminDrafts.push({
-      id: 'tmp_' + Date.now(),
-      name,
-      lat,
-      lng,
-      maps_url: null,
-      thumbnail: null,
-      description: null
+  container.querySelectorAll('.input-duration').forEach(input => {
+    input.addEventListener('change', (e) => {
+      const idx = parseInt(e.target.dataset.idx);
+      const val = parseInt(e.target.value) || 60;
+      State.destinations[idx].duration = val;
+      saveItineraryState();
+    });
+  });
+
+  // Drag and Drop ordering
+  bindDragAndDrop(container);
+}
+
+// ── Drag & Drop Implementation ────────────────────────────
+let dragSourceIndex = null;
+
+function bindDragAndDrop(container) {
+  const cards = container.querySelectorAll('.timeline-stop-wrapper');
+  
+  cards.forEach(wrapper => {
+    const stopCard = wrapper.querySelector('.timeline-stop-card');
+
+    stopCard.addEventListener('dragstart', (e) => {
+      dragSourceIndex = parseInt(wrapper.dataset.index);
+      e.dataTransfer.effectAllowed = 'move';
+      wrapper.style.opacity = '0.5';
     });
 
-    document.getElementById('admin-manual-name').value = '';
-    document.getElementById('admin-manual-lat').value = '';
-    document.getElementById('admin-manual-lng').value = '';
+    wrapper.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+    });
 
-    renderAdminDestList();
-    showToast(`➕ "${name}" added!`, 'success');
-  });
+    wrapper.addEventListener('dragenter', () => {
+      wrapper.style.borderLeft = '2px solid var(--primary)';
+    });
 
-  // Save Draft
-  document.getElementById('btn-save-draft').addEventListener('click', async () => {
-    await adminSaveAll(false);
-  });
+    wrapper.style.transition = 'border 0.1s ease';
 
-  // Publish (header button)
-  document.getElementById('btn-publish-header').addEventListener('click', async () => {
-    await adminSaveAll(true);
-  });
+    wrapper.addEventListener('dragleave', () => {
+      wrapper.style.borderLeft = '';
+    });
 
-  // Publish (bottom button)
-  document.getElementById('btn-publish-bottom').addEventListener('click', async () => {
-    await adminSaveAll(true);
+    stopCard.addEventListener('dragend', () => {
+      wrapper.style.opacity = '1';
+      cards.forEach(c => c.style.borderLeft = '');
+    });
+
+    wrapper.addEventListener('drop', (e) => {
+      e.preventDefault();
+      wrapper.style.borderLeft = '';
+      const targetIndex = parseInt(wrapper.dataset.index);
+      
+      if (dragSourceIndex !== null && dragSourceIndex !== targetIndex) {
+        // Swap or move elements
+        const movedItem = State.destinations.splice(dragSourceIndex, 1)[0];
+        State.destinations.splice(targetIndex, 0, movedItem);
+        saveItineraryState();
+      }
+      dragSourceIndex = null;
+    });
   });
 }
 
-async function adminSaveAll(publish) {
-  const name = document.getElementById('admin-trip-name').value.trim();
-  if (!name) { showToast('Please enter a trip name.', 'warning'); return; }
+// ── State Mutators ────────────────────────────────────────
+function addPlaceToItinerary(poolIdx) {
+  const place = State.importedPlaces[poolIdx];
+  if (!place) return;
 
-  const desc = document.getElementById('admin-trip-desc').value.trim();
-  const date = document.getElementById('admin-trip-date').value;
+  // Generate a unique ID
+  const newStop = {
+    id: 'dest_' + Math.random().toString(36).substr(2, 9),
+    name: place.name,
+    lat: place.lat,
+    lng: place.lng,
+    maps_url: place.maps_url || '',
+    category: place.category || 'Attraction',
+    time: State.destinations.length === 0 ? '09:00 AM' : '', // Seq auto calculated
+    duration: 90
+  };
 
-  const btn = publish
-    ? document.getElementById('btn-publish-bottom')
-    : document.getElementById('btn-save-draft');
-  const origText = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = 'Saving...';
+  State.destinations.push(newStop);
+  saveItineraryState();
+  showToast(`📍 Added "${place.name}" to itinerary!`, 'success');
+}
 
-  try {
-    // Save or create trip
-    const tripData = await saveTrip({
-      id: App.adminTripId,
-      name,
-      description: desc,
-      startDate: date,
-      published: publish ? true : false
-    });
-    App.adminTripId = tripData.id;
-
-    // Save destinations
-    await saveDestinations(App.adminTripId, App.adminDrafts);
-
-    if (publish) {
-      await publishTrip(App.adminTripId);
-      showToast('🚀 Trip published to the group!', 'success');
-      // Reload itinerary in main app
-      await loadItinerary();
-    } else {
-      showToast('💾 Draft saved!', 'success');
-    }
-  } catch (err) {
-    showToast(err.message || 'Save failed. Check your Supabase connection.', 'error');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = origText;
+function removePlaceFromItinerary(idx) {
+  const removed = State.destinations.splice(idx, 1)[0];
+  saveItineraryState();
+  if (removed) {
+    showToast(`✕ Removed "${removed.name}" from itinerary.`, 'info');
   }
 }
 
-/** Parse Google Maps URL via CORS proxy */
-async function importFromMapsUrl(url) {
+function deleteFromPool(idx) {
+  const removed = State.importedPlaces.splice(idx, 1)[0];
+  localStorage.setItem('tq_imported_places', JSON.stringify(State.importedPlaces));
+  renderSavedPlacesPool();
+  if (removed) {
+    showToast(`Deleted "${removed.name}" from saved list.`, 'info');
+  }
+}
+
+// ── Leaflet Map Controls ──────────────────────────────────
+function initLeafletMap() {
+  const center = State.destinations.length > 0 
+    ? [State.destinations[0].lat, State.destinations[0].lng] 
+    : [15.5523, 73.7771]; // Default to Goa
+
+  State.map = L.map('map-container', {
+    zoomControl: false,
+    scrollWheelZoom: true
+  }).setView(center, 12);
+
+  // CartoDB Voyager tiles - very playful, clean, matching a colorful design system!
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; OpenStreetMap &copy; CartoDB',
+    subdomains: 'abcd',
+    maxZoom: 20
+  }).addTo(State.map);
+
+  L.control.zoom({
+    position: 'bottomright'
+  }).addTo(State.map);
+
+  State.markersLayer = L.layerGroup().addTo(State.map);
+
+  drawRouteOnMap();
+}
+
+function drawRouteOnMap() {
+  if (!State.map || !State.markersLayer) return;
+
+  State.markersLayer.clearLayers();
+  if (State.routeLine) {
+    State.map.removeLayer(State.routeLine);
+    State.routeLine = null;
+  }
+
+  if (State.destinations.length === 0) return;
+
+  const latlngs = [];
+  State.destinations.forEach((stop, idx) => {
+    const coords = [stop.lat, stop.lng];
+    latlngs.push(coords);
+
+    const color = CategoryColors[stop.category] || '#FF6B4A';
+    
+    // Check if this stop is the currently active one
+    const isActive = (idx === State.activeStopIndex && !State.isTransit);
+
+    const customIcon = L.divIcon({
+      html: `
+        <div class="custom-map-pin ${isActive ? 'active' : ''}" style="background-color: ${color}; border: 3px solid #FFF;">
+          <span class="pin-number">${idx + 1}</span>
+        </div>
+      `,
+      className: 'custom-leaflet-icon',
+      iconSize: [32, 32],
+      iconAnchor: [16, 32]
+    });
+
+    const marker = L.marker(coords, { icon: customIcon });
+    
+    // Custom popup content
+    const emoji = CategoryEmojis[stop.category] || '📍';
+    const popupContent = `
+      <div class="map-popup-card">
+        <h4>${emoji} ${stop.name}</h4>
+        <p>Category: <b>${stop.category}</b></p>
+        <p>Arrival: <b>${stop.time}</b> (${stop.duration} mins)</p>
+        ${stop.maps_url ? `<p style="margin-top:5px;"><a href="${stop.maps_url}" target="_blank" style="color:var(--primary); text-decoration:none; font-weight:600;">View on Google Maps ↗</a></p>` : ''}
+      </div>
+    `;
+
+    marker.bindPopup(popupContent);
+    State.markersLayer.addLayer(marker);
+  });
+
+  // Connecting route line
+  if (latlngs.length > 1) {
+    State.routeLine = L.polyline(latlngs, {
+      color: '#FF6B4A',
+      weight: 4,
+      opacity: 0.8,
+      dashArray: '8, 8',
+      lineJoin: 'round'
+    }).addTo(State.map);
+
+    // Zoom map to show entire path bounds
+    try {
+      State.map.fitBounds(State.routeLine.getBounds(), { padding: [50, 50] });
+    } catch (e) {
+      console.warn('Map fit bounds issue:', e);
+    }
+  } else if (latlngs.length === 1) {
+    State.map.setView(latlngs[0], 14);
+  }
+}
+
+// ── Google Maps Shared List / Place URL Scraper ───────────
+async function importFromInput() {
+  const importInput = document.getElementById('import-input');
+  const inputStr = importInput.value.trim();
+  if (!inputStr) {
+    showToast('Please enter Google Maps links or place names.', 'warning');
+    return;
+  }
+
+  const btn = document.getElementById('btn-import');
+  const progress = document.getElementById('import-progress');
+  const progressText = document.getElementById('import-progress-text');
+  const defaultCategory = document.getElementById('import-category').value;
+
+  btn.disabled = true;
+  progress.style.display = 'flex';
+  progressText.textContent = 'Analyzing input...';
+
+  // Process input line-by-line
+  const lines = inputStr.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  let successCount = 0;
+  let failCount = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    
+    // Check if it's a URL
+    if (line.startsWith('http://') || line.startsWith('https://')) {
+      progressText.textContent = `Scraping URL (${i + 1}/${lines.length})...`;
+      try {
+        const place = await scrapeGoogleMapsUrl(line);
+        if (place && place.name) {
+          State.importedPlaces.push({
+            name: place.name,
+            lat: place.lat,
+            lng: place.lng,
+            category: defaultCategory,
+            maps_url: line,
+            description: ''
+          });
+          successCount++;
+        } else {
+          // If URL scrape fails to find coords, fall back to searching the name via geocoding
+          if (place && place.name && !place.lat) {
+            const geocoded = await geocodeTextName(place.name);
+            if (geocoded) {
+              State.importedPlaces.push({
+                name: place.name,
+                lat: geocoded.lat,
+                lng: geocoded.lng,
+                category: defaultCategory,
+                maps_url: line,
+                description: ''
+              });
+              successCount++;
+              continue;
+            }
+          }
+          failCount++;
+        }
+      } catch (e) {
+        console.warn('URL scraping failed, trying text-search fallback...', e);
+        // Extract possible query names from typical Google Maps URLs
+        const queryName = extractNameFromMapsUrl(line);
+        if (queryName) {
+          const geocoded = await geocodeTextName(queryName);
+          if (geocoded) {
+            State.importedPlaces.push({
+              name: queryName,
+              lat: geocoded.lat,
+              lng: geocoded.lng,
+              category: defaultCategory,
+              maps_url: line,
+              description: ''
+            });
+            successCount++;
+            continue;
+          }
+        }
+        failCount++;
+      }
+    } else {
+      // It's a text search
+      progressText.textContent = `Searching "${line}" (${i + 1}/${lines.length})...`;
+      try {
+        const geocoded = await geocodeTextName(line);
+        if (geocoded) {
+          State.importedPlaces.push({
+            name: geocoded.name || line,
+            lat: geocoded.lat,
+            lng: geocoded.lng,
+            category: defaultCategory,
+            maps_url: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(line)}`,
+            description: ''
+          });
+          successCount++;
+        } else {
+          failCount++;
+        }
+      } catch (e) {
+        failCount++;
+      }
+      // Delay to respect OSM Nominatim rate limit (1 request/second)
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+
+  // Save imported places pool to localstorage
+  localStorage.setItem('tq_imported_places', JSON.stringify(State.importedPlaces));
+  renderSavedPlacesPool();
+  importInput.value = '';
+
+  btn.disabled = false;
+  progress.style.display = 'none';
+
+  if (successCount > 0) {
+    showToast(`Successfully imported ${successCount} places!`, 'success');
+  }
+  if (failCount > 0) {
+    showToast(`Failed to resolve ${failCount} items. Try typing exact names.`, 'warning', 4000);
+  }
+}
+
+function extractNameFromMapsUrl(url) {
+  try {
+    const decoded = decodeURIComponent(url);
+    // Matches patterns like .../place/Place+Name/...
+    const placeMatch = decoded.match(/maps\/place\/([^/@]+)/);
+    if (placeMatch) return placeMatch[1].replace(/\+/g, ' ');
+
+    // Matches search query parameters
+    const queryMatch = decoded.match(/query=([^&]+)/) || decoded.match(/q=([^&]+)/);
+    if (queryMatch) return queryMatch[1].replace(/\+/g, ' ');
+  } catch (e) {}
+  return null;
+}
+
+/** Parses Google Maps URL using CORS Proxy */
+async function scrapeGoogleMapsUrl(url) {
   const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-  const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(12000) });
-  if (!res.ok) throw new Error('CORS proxy request failed.');
+  const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(10000) });
+  if (!res.ok) throw new Error('CORS Proxy failed');
 
   const json = await res.json();
   const html = json.contents || '';
   const finalUrl = json.status?.url || url;
 
-  // Extract name from <title>
-  let name = 'Imported Place';
+  // Extract name from HTML title
+  let name = '';
   const titleMatch = html.match(/<title[^>]*>([^<|·]+)/i);
   if (titleMatch) {
-    name = titleMatch[1]
-      .replace(/\s*[-|·]\s*Google Maps.*$/i, '')
-      .trim();
+    name = titleMatch[1].replace(/\s*[-|·]\s*Google Maps.*$/i, '').trim();
   }
   if (!name || name.toLowerCase().includes('google maps')) {
-    // Fallback: extract from URL path
-    const pathMatch = (finalUrl + url).match(/maps\/place\/([^/@]+)/);
-    if (pathMatch) name = decodeURIComponent(pathMatch[1].replace(/\+/g, ' '));
+    const extracted = extractNameFromMapsUrl(finalUrl);
+    if (extracted) name = extracted;
   }
 
   // Extract coordinates
   let lat = null, lng = null;
-  const coordMatch = (finalUrl + html).match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
-  if (coordMatch) {
-    lat = parseFloat(coordMatch[1]);
-    lng = parseFloat(coordMatch[2]);
+  // Look for patterns like @15.5523,73.7771
+  const coordsMatch = (finalUrl + html).match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+  if (coordsMatch) {
+    lat = parseFloat(coordsMatch[1]);
+    lng = parseFloat(coordsMatch[2]);
+  } else {
+    // Alternate format: [null,null,lat,lng] inside JS
+    const altCoordsMatch = html.match(/\[null,null,(-?\d+\.\d+),(-?\d+\.\d+)\]/);
+    if (altCoordsMatch) {
+      lat = parseFloat(altCoordsMatch[1]);
+      lng = parseFloat(altCoordsMatch[2]);
+    }
   }
 
-  // Try alternate coord pattern from JSON-LD or meta
-  if (!lat) {
-    const altMatch = html.match(/\[null,null,(-?\d+\.\d+),(-?\d+\.\d+)\]/);
-    if (altMatch) { lat = parseFloat(altMatch[1]); lng = parseFloat(altMatch[2]); }
-  }
-
-  // Extract og:image thumbnail
-  let thumbnail = null;
-  const imgMatch = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)/i)
-    || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
-  if (imgMatch) thumbnail = imgMatch[1];
-
-  return { name, lat, lng, thumbnail };
+  return { name: name || 'Google Maps Place', lat, lng };
 }
 
-/** Render drag-and-drop destination list in admin panel */
-function renderAdminDestList() {
-  const container = document.getElementById('admin-dest-list');
-  const countEl = document.getElementById('dest-count');
-  if (!container) return;
+/** Geocodes place name using OpenStreetMap Nominatim API */
+async function geocodeTextName(name) {
+  const cleanQuery = name.trim();
+  const searchUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(cleanQuery)}&limit=1`;
+  
+  const res = await fetch(searchUrl, {
+    headers: {
+      'Accept-Language': 'en',
+      // Nominatim requires a user-agent to prevent blocking
+      'User-Agent': 'TripQuest Itinerary Planner'
+    }
+  });
 
-  const count = App.adminDrafts.length;
-  if (countEl) countEl.textContent = `${count} ${count === 1 ? 'place' : 'places'}`;
+  if (!res.ok) return null;
+  const json = await res.json();
+  if (json && json.length > 0) {
+    const result = json[0];
+    return {
+      name: result.name || result.display_name.split(',')[0],
+      lat: parseFloat(result.lat),
+      lng: parseFloat(result.lon)
+    };
+  }
+  return null;
+}
 
-  if (count === 0) {
-    container.innerHTML = '<div class="admin-dest-empty">No destinations added yet.</div>';
+// ── Real-Time Tracking Core ──────────────────────────────
+function startClock() {
+  // Run every second
+  setInterval(() => {
+    let activeMinutes;
+    
+    if (State.isSimulating) {
+      activeMinutes = State.simulatedMinutes;
+    } else {
+      activeMinutes = getCurrentMinutesFromMidnight();
+    }
+
+    // Update digital clock display
+    const clockEl = document.getElementById('clock-display');
+    if (clockEl) {
+      clockEl.textContent = formatMinutes(activeMinutes);
+    }
+
+    // Determine current stop status
+    evaluateCurrentStopStatus(activeMinutes);
+  }, 1000);
+}
+
+function evaluateCurrentStopStatus(activeTime) {
+  if (State.destinations.length === 0) {
+    updateActiveStopUI(null, false);
     return;
   }
 
-  container.innerHTML = '';
+  let matchedIdx = null;
+  let isTransit = false;
+  let transitFrom = null;
+  let transitTo = null;
 
-  App.adminDrafts.forEach((dest, i) => {
-    const item = document.createElement('div');
-    item.className = 'admin-dest-item';
-    item.draggable = true;
-    item.dataset.idx = i;
-
-    const coordText = dest.lat && dest.lng
-      ? `${dest.lat.toFixed(4)}, ${dest.lng.toFixed(4)}`
-      : 'No coordinates';
-
-    item.innerHTML = `
-      <span class="drag-handle" title="Drag to reorder">⠿⠿</span>
-      <div class="dest-item-num">${i + 1}</div>
-      <div class="dest-item-info">
-        <div class="dest-item-name">${dest.name}</div>
-        <div class="dest-item-coords">${coordText}</div>
-      </div>
-      <button class="dest-item-remove" data-idx="${i}" title="Remove">✕</button>
-    `;
-
-    // Remove button
-    item.querySelector('.dest-item-remove').addEventListener('click', (e) => {
-      e.stopPropagation();
-      const idx = parseInt(e.currentTarget.dataset.idx);
-      App.adminDrafts.splice(idx, 1);
-      renderAdminDestList();
+  const firstStopStart = parseTimeToMinutes(State.destinations[0].time);
+  
+  if (activeTime < firstStopStart) {
+    // Before trip starts
+    updateActiveStopUI({
+      type: 'upcoming',
+      nextStop: State.destinations[0]
     });
+    return;
+  }
 
-    container.appendChild(item);
-  });
+  for (let i = 0; i < State.destinations.length; i++) {
+    const stop = State.destinations[i];
+    const start = parseTimeToMinutes(stop.time);
+    const end = start + (parseInt(stop.duration) || 60);
 
-  // ── Drag-and-Drop ──
-  let dragSrcIdx = null;
+    // Check if active time matches this stop duration
+    if (activeTime >= start && activeTime <= end) {
+      matchedIdx = i;
+      break;
+    }
 
-  container.querySelectorAll('.admin-dest-item').forEach(item => {
-    item.addEventListener('dragstart', (e) => {
-      dragSrcIdx = parseInt(item.dataset.idx);
-      item.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
+    // Check if active time falls between this stop and the next
+    if (i < State.destinations.length - 1) {
+      const nextStop = State.destinations[i + 1];
+      const nextStart = parseTimeToMinutes(nextStop.time);
+      
+      if (activeTime > end && activeTime < nextStart) {
+        isTransit = true;
+        transitFrom = stop;
+        transitTo = nextStop;
+        break;
+      }
+    }
+  }
+
+  if (matchedIdx !== null) {
+    // Stop is active
+    const activeStop = State.destinations[matchedIdx];
+    const endMins = parseTimeToMinutes(activeStop.time) + (parseInt(activeStop.duration) || 60);
+    const remaining = endMins - activeTime;
+
+    updateActiveStopUI({
+      type: 'active',
+      stop: activeStop,
+      index: matchedIdx,
+      remainingText: `ends in ${remaining} mins`
     });
+  } else if (isTransit) {
+    // Currently traveling
+    const nextStart = parseTimeToMinutes(transitTo.time);
+    const remaining = nextStart - activeTime;
+    const dist = haversineKm(transitFrom.lat, transitFrom.lng, transitTo.lat, transitTo.lng);
+    const transit = estimateTransit(dist);
 
-    item.addEventListener('dragend', () => {
-      item.classList.remove('dragging');
-      container.querySelectorAll('.admin-dest-item').forEach(i => i.classList.remove('drag-over'));
+    updateActiveStopUI({
+      type: 'transit',
+      from: transitFrom,
+      to: transitTo,
+      remainingText: `Arriving in ~${remaining} min (${formatDistance(dist)} ${transit.mode.split(' ')[0]})`
     });
-
-    item.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      container.querySelectorAll('.admin-dest-item').forEach(i => i.classList.remove('drag-over'));
-      item.classList.add('drag-over');
+  } else {
+    // Past last stop
+    updateActiveStopUI({
+      type: 'completed'
     });
-
-    item.addEventListener('drop', (e) => {
-      e.preventDefault();
-      const targetIdx = parseInt(item.dataset.idx);
-      if (dragSrcIdx === null || dragSrcIdx === targetIdx) return;
-
-      // Reorder
-      const moved = App.adminDrafts.splice(dragSrcIdx, 1)[0];
-      App.adminDrafts.splice(targetIdx, 0, moved);
-      dragSrcIdx = null;
-
-      renderAdminDestList();
-    });
-  });
+  }
 }
 
-// ══════════════════════════════════════════════════════════
-// SUPABASE SETUP MODAL
-// ══════════════════════════════════════════════════════════
+let lastActiveIndex = null;
+let lastIsTransit = null;
 
-function bindSupabaseModalEvents() {
+function updateActiveStopUI(status, forceMapDraw = true) {
+  const card = document.getElementById('active-stop-card');
+  const placeTitle = document.getElementById('active-place-name');
+  const timeDesc = document.getElementById('active-place-time');
+
+  if (!status) {
+    placeTitle.textContent = 'No stops planned';
+    timeDesc.textContent = 'Add places to the timeline';
+    State.activeStopIndex = null;
+    State.isTransit = false;
+    return;
+  }
+
+  let changed = false;
+
+  if (status.type === 'upcoming') {
+    card.querySelector('.status-label').textContent = 'UPCOMING FIRST STOP';
+    placeTitle.textContent = status.nextStop.name;
+    timeDesc.textContent = `Starts at ${status.nextStop.time}`;
+    
+    if (State.activeStopIndex !== null || State.isTransit !== false) {
+      State.activeStopIndex = null;
+      State.isTransit = false;
+      changed = true;
+    }
+  } 
+  else if (status.type === 'active') {
+    card.querySelector('.status-label').textContent = '🟢 CURRENT STOP';
+    placeTitle.textContent = status.stop.name;
+    timeDesc.textContent = `${status.stop.time} - ${formatMinutes(parseTimeToMinutes(status.stop.time) + parseInt(status.stop.duration))} (${status.remainingText})`;
+    
+    if (State.activeStopIndex !== status.index || State.isTransit !== false) {
+      State.activeStopIndex = status.index;
+      State.isTransit = false;
+      changed = true;
+    }
+  } 
+  else if (status.type === 'transit') {
+    card.querySelector('.status-label').textContent = '🚗 TRANSIT BETWEEN STOPS';
+    placeTitle.textContent = `Heading to ${status.to.name}`;
+    timeDesc.textContent = status.remainingText;
+    
+    if (State.activeStopIndex !== null || State.isTransit !== true) {
+      State.activeStopIndex = null;
+      State.isTransit = true;
+      changed = true;
+    }
+  } 
+  else if (status.type === 'completed') {
+    card.querySelector('.status-label').textContent = '🏁 TRIP COMPLETED';
+    placeTitle.textContent = 'All stops visited!';
+    timeDesc.textContent = 'Itinerary completed for today.';
+    
+    if (State.activeStopIndex !== null || State.isTransit !== false) {
+      State.activeStopIndex = null;
+      State.isTransit = false;
+      changed = true;
+    }
+  }
+
+  // Highlight timeline active nodes & marker animations if state transitions
+  if (changed || forceMapDraw) {
+    // 1. Re-render timeline to highlight active card
+    renderTimeline();
+
+    // 2. Redraw map to update pulsing active marker
+    drawRouteOnMap();
+
+    // 3. Center map on active location
+    if (status.type === 'active' && State.map) {
+      State.map.setView([status.stop.lat, status.stop.lng], 14);
+    } else if (status.type === 'transit' && State.map) {
+      // Zoom map to show the bounds between the transit points
+      const bounds = L.latLngBounds(
+        [status.from.lat, status.from.lng],
+        [status.to.lat, status.to.lng]
+      );
+      State.map.fitBounds(bounds, { padding: [100, 100] });
+    }
+  }
+}
+
+// ── Event Bindings ────────────────────────────────────────
+function bindEvents() {
+  // Import click
+  document.getElementById('btn-import').addEventListener('click', importFromInput);
+
+  // Save Trip Details
+  document.getElementById('trip-name').addEventListener('change', saveTripDetails);
+
+  // Modal Setup
+  const setupBtn = document.getElementById('btn-open-sb-setup');
   const modal = document.getElementById('modal-supabase');
-  const statusEl = document.getElementById('sb-connection-status');
+  const cancelBtn = document.getElementById('btn-sb-cancel');
+  const connectBtn = document.getElementById('btn-sb-connect');
 
-  // Close
-  document.getElementById('btn-sb-cancel').addEventListener('click', () => {
-    modal.classList.remove('open');
-  });
-  modal.addEventListener('click', (e) => {
-    if (e.target === modal) modal.classList.remove('open');
+  setupBtn.addEventListener('click', () => {
+    modal.classList.add('active');
+    // Pre-fill
+    const creds = getCredentials();
+    document.getElementById('sb-url').value = creds.url;
+    document.getElementById('sb-key').value = creds.key;
+    document.getElementById('sb-connection-status').textContent = isConnected() ? '✅ Connected' : '❌ Disconnected';
+    document.getElementById('sb-connection-status').style.color = isConnected() ? 'var(--success)' : 'var(--danger)';
   });
 
-  // Connect
-  document.getElementById('btn-sb-connect').addEventListener('click', async () => {
+  cancelBtn.addEventListener('click', () => {
+    modal.classList.remove('active');
+  });
+
+  connectBtn.addEventListener('click', async () => {
     const url = document.getElementById('sb-url').value.trim();
     const key = document.getElementById('sb-key').value.trim();
-
+    
     if (!url || !key) {
-      statusEl.textContent = 'Please enter both URL and API key.';
-      statusEl.className = 'sb-status err';
+      // Clear credentials (disconnect)
+      saveCredentials('', '');
+      showToast('Database Sync disconnected (running offline)', 'info');
+      modal.classList.remove('active');
+      await loadState();
+      renderAll();
+      drawRouteOnMap();
       return;
     }
 
-    const btn = document.getElementById('btn-sb-connect');
-    btn.textContent = 'Testing...';
-    btn.disabled = true;
+    const statusEl = document.getElementById('sb-connection-status');
     statusEl.textContent = 'Connecting...';
-    statusEl.className = 'sb-status';
+    statusEl.style.color = 'var(--text-muted)';
 
-    const result = await testConnection(url, key);
-
-    if (result.ok) {
-      statusEl.textContent = '✅ Connected successfully!';
-      statusEl.className = 'sb-status ok';
-      showToast('Supabase connected!', 'success');
-      setTimeout(() => modal.classList.remove('open'), 1200);
+    const res = await testConnection(url, key);
+    if (res.ok) {
+      showToast('Supabase successfully synced!', 'success');
+      modal.classList.remove('active');
+      
+      // Reload everything to pull from DB
+      await loadState();
+      renderAll();
+      drawRouteOnMap();
     } else {
-      statusEl.textContent = `❌ ${result.message}`;
-      statusEl.className = 'sb-status err';
+      statusEl.textContent = `Error: ${res.message}`;
+      statusEl.style.color = 'var(--danger)';
     }
-
-    btn.textContent = 'Connect 🔌';
-    btn.disabled = false;
   });
 
-  // Also open from auth screen (already bound via btn-open-sb-setup)
+  // Time simulation controls
+  const toggle = document.getElementById('sim-time-toggle');
+  const sliderRow = document.getElementById('sim-slider-row');
+  const slider = document.getElementById('sim-time-slider');
+  const sliderLabel = document.getElementById('sim-time-label');
+  const modeBadge = document.getElementById('tracker-mode-badge');
+
+  toggle.addEventListener('change', (e) => {
+    State.isSimulating = e.target.checked;
+    if (State.isSimulating) {
+      sliderRow.style.display = 'block';
+      modeBadge.textContent = 'Simulated';
+      modeBadge.classList.add('simulated');
+      
+      // Set slider to current actual time first
+      const currentMin = getCurrentMinutesFromMidnight();
+      slider.value = currentMin;
+      State.simulatedMinutes = currentMin;
+      sliderLabel.textContent = formatMinutes(currentMin);
+    } else {
+      sliderRow.style.display = 'none';
+      modeBadge.textContent = 'Real-Time';
+      modeBadge.classList.remove('simulated');
+    }
+    // Instantly refresh UI
+    evaluateCurrentStopStatus(State.isSimulating ? State.simulatedMinutes : getCurrentMinutesFromMidnight());
+  });
+
+  slider.addEventListener('input', (e) => {
+    const val = parseInt(e.target.value);
+    State.simulatedMinutes = val;
+    sliderLabel.textContent = formatMinutes(val);
+    evaluateCurrentStopStatus(val);
+  });
+}
+
+// ── Toast Notifications ──
+function showToast(message, type = 'info', duration = 3000) {
+  const container = document.getElementById('toast-container');
+  if (!container) return;
+
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  const icons = { success: '✅', warning: '⚠️', error: '❌', info: 'ℹ️' };
+  toast.innerHTML = `<span>${icons[type] || 'ℹ️'}</span><span>${message}</span>`;
+  container.appendChild(toast);
+
+  setTimeout(() => {
+    toast.style.animation = 'slideIn 0.3s ease reverse forwards';
+    setTimeout(() => toast.remove(), 300);
+  }, duration);
 }
